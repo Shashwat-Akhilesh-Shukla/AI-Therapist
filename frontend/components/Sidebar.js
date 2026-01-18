@@ -98,8 +98,8 @@ function DarkToggle(){
       const saved = localStorage.getItem('cognitiveai_dark')
       const initial = saved === 'true'
       setDark(initial)
-      document.documentElement.classList.toggle('dark', initial)
-      document.documentElement.classList.toggle('light', !initial)
+      document.documentElement.classList.toggle('light', initial)
+      document.documentElement.classList.toggle('dark', !initial)
     }catch(e){
       // ignore
     }
@@ -111,12 +111,13 @@ function DarkToggle(){
     setDark(next)
     try{
       localStorage.setItem('cognitiveai_dark', String(next))
-      document.documentElement.classList.toggle('dark', next)
-      document.documentElement.classList.toggle('light', !next)
+      document.documentElement.classList.toggle('light', next)
+      document.documentElement.classList.toggle('dark', !next)
     }catch(e){ }
   }
 
   // during SSR render nothing to avoid mismatch
-  const label = !mounted ? '...' : (dark ? 'Light' : 'Dark')
-  return <button className="btn toggle" onClick={toggle}>{label}</button>
+  const icon = !mounted ? '◐' : (dark ? '☀️' : '🌙')
+  return <button className="btn toggle" onClick={toggle} title={dark ? 'Light mode' : 'Dark mode'}>{icon}</button>
 }
+
