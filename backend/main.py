@@ -622,14 +622,14 @@ async def upload_pdf(
     """
     Upload and process a PDF file (user-scoped).
 
-    PDF content is extracted and stored server-side only.
-    Frontend receives only a doc_id reference.
+    PDF content is extracted, validated, and stored server-side for semantic search.
+    Frontend receives only a doc_id reference and can use it in subsequent chat messages.
     """
     if not pdf_loader:
         raise HTTPException(status_code=503, detail="PDF loader not initialized")
 
     
-    if not file.filename.lower().endswith('.pdf'):
+    if not file.filename or not file.filename.lower().endswith('.pdf'):
         raise HTTPException(status_code=400, detail="Only PDF files are supported")
 
     try:
@@ -637,7 +637,10 @@ async def upload_pdf(
         content = await file.read()
         max_upload_size = 5 * 1024 * 1024
         if len(content) > max_upload_size:
-            raise HTTPException(status_code=400, detail="Uploaded PDF exceeds maximum allowed size of 5 MB")
+            raise HTTPException(status_code=400, detail=f"Uploaded PDF exceeds maximum allowed size of 5 MB (got {len(content) / (1024*1024):.1f} MB)")
+        
+        if len(content) < 100:
+            raise HTTPException(status_code=400, detail="Uploaded file is too small or empty")
 
         
         with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as temp_file:
@@ -647,6 +650,8 @@ async def upload_pdf(
         
         import uuid as _uuid
         doc_id = str(_uuid.uuid4())
+        
+        logger.info(f"PDF upload initiated: {file.filename} (user {user_id}, doc_id {doc_id}, size {len(content) / 1024:.1f} KB)")
 
         
         background_tasks.add_task(
@@ -658,16 +663,17 @@ async def upload_pdf(
         )
 
         return {
-            "message": f"PDF '{file.filename}' upload initiated.",
+            "message": f"PDF '{file.filename}' received and is being processed. Use doc_id in chat to reference it.",
             "filename": file.filename,
             "status": "processing",
-            "doc_id": doc_id
+            "doc_id": doc_id,
+            "size_kb": len(content) / 1024
         }
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"PDF upload error for user {user_id}: {e}")
+        logger.error(f"PDF upload error for user {user_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"PDF upload failed: {str(e)}")
 
 
@@ -677,19 +683,23 @@ def process_pdf_background(
     doc_id: str,
     user_id: str
 ):
-    """Process PDF in background, store extracted text server-side only."""
+    """Process PDF in background, store extracted text and chunks for LLM usage."""
     try:
+        logger.info(f"Starting PDF processing for {filename} (user {user_id}, doc_id {doc_id})")
         
+        # Extract and validate text
         extracted = pdf_loader.extract_text(file_path)
-
         
         max_bytes = 200 * 1024
-        if len(extracted.encode("utf-8")) > max_bytes:
-            logger.error(f"Extracted text for {filename} (user {user_id}) exceeds {max_bytes} bytes; rejecting upload")
+        extracted_bytes = len(extracted.encode("utf-8"))
+        if extracted_bytes > max_bytes:
+            logger.error(f"Extracted text for {filename} (user {user_id}) is {extracted_bytes / 1024:.1f} KB, exceeds limit of 200 KB")
             Path(file_path).unlink(missing_ok=True)
             return
-
         
+        logger.info(f"Extracted {extracted_bytes / 1024:.1f} KB from {filename}")
+
+        # Store extracted text in Redis for quick retrieval
         try:
             from backend.redis_client import get_redis
             import os
@@ -697,12 +707,13 @@ def process_pdf_background(
             key = f"pdf:{user_id}:{doc_id}"
             r.set(key, extracted)
             r.expire(key, int(os.getenv("STM_TTL", "1800")))
-        except Exception:
-            logger.warning(f"Could not store extracted PDF text in Redis for user {user_id}")
+            logger.info(f"Stored extracted PDF text in Redis: {key}")
+        except Exception as redis_error:
+            logger.warning(f"Could not store extracted PDF text in Redis: {redis_error}")
 
-        logger.info(f"PDF {filename} processed for user {user_id} (doc_id={doc_id})")
+        logger.info(f"Loading PDF into LTM for {filename} (user {user_id})")
 
-        
+        # Load into LTM for semantic search and chunking
         if pdf_loader:
             try:
                 pdf_loader.load_pdf(
@@ -711,21 +722,43 @@ def process_pdf_background(
                     doc_id=doc_id,
                     user_id=user_id
                 )
-            finally:
-                
+                logger.info(f"Successfully loaded PDF {filename} into LTM for user {user_id}")
+            except ValueError as val_error:
+                logger.error(f"PDF validation failed for {filename}: {val_error}")
+                # Clean up Redis if LTM load fails
                 try:
                     from backend.redis_client import get_redis
                     r = get_redis()
                     r.delete(f"pdf:{user_id}:{doc_id}")
                 except Exception:
                     pass
-
-        
-        Path(file_path).unlink(missing_ok=True)
+                return
+            except Exception as load_error:
+                logger.error(f"Failed to load PDF {filename} into LTM: {load_error}")
+                # Clean up Redis if LTM load fails
+                try:
+                    from backend.redis_client import get_redis
+                    r = get_redis()
+                    r.delete(f"pdf:{user_id}:{doc_id}")
+                except Exception:
+                    pass
+                return
+            finally:
+                # Always clean up temp file
+                try:
+                    Path(file_path).unlink(missing_ok=True)
+                except Exception as cleanup_error:
+                    logger.warning(f"Failed to delete temp file {file_path}: {cleanup_error}")
+        else:
+            logger.error("PDF loader not initialized")
+            Path(file_path).unlink(missing_ok=True)
 
     except Exception as e:
-        logger.error(f"Background PDF processing failed for {filename} (user {user_id}): {e}")
-        Path(file_path).unlink(missing_ok=True)
+        logger.error(f"Background PDF processing failed for {filename} (user {user_id}): {e}", exc_info=True)
+        try:
+            Path(file_path).unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 

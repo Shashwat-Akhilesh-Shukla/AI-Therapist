@@ -39,14 +39,20 @@ class PDFLoader:
 
     def load_pdf(self, pdf_path: str, metadata: Optional[Dict[str, Any]] = None, doc_id: Optional[str] = None, user_id: Optional[str] = None) -> str:
         """
-        Load and process a PDF file.
+        Load and process a PDF file with validation.
 
         Args:
             pdf_path: Path to the PDF file
             metadata: Additional metadata for the PDF
+            doc_id: Document ID (generated if not provided)
+            user_id: User ID for isolation
 
         Returns:
             PDF document ID
+
+        Raises:
+            FileNotFoundError: If PDF doesn't exist
+            ValueError: If PDF is invalid or has no extractable text
         """
         pdf_file_path = Path(pdf_path)
         if not pdf_file_path.exists():
@@ -60,6 +66,15 @@ class PDFLoader:
         try:
             
             full_text = self._extract_text_pdfplumber(pdf_path)
+            
+            # Validate extracted text
+            if not full_text or not full_text.strip():
+                raise ValueError(f"PDF {pdf_file_path.name} has no extractable text. It may be a scanned image or encrypted.")
+            
+            # Check for minimum content
+            text_length = len(full_text.strip())
+            if text_length < 10:
+                raise ValueError(f"PDF {pdf_file_path.name} contains insufficient text ({text_length} chars). Minimum 10 characters required.")
 
             
             if user_id:
@@ -74,7 +89,7 @@ class PDFLoader:
                     raw_bytes = full_text.encode("utf-8")
                     if len(raw_bytes) > max_bytes:
                         
-                        raise ValueError("Extracted PDF text exceeds allowed size of 200 KB")
+                        raise ValueError(f"Extracted PDF text exceeds allowed size of 200 KB. Extracted: {len(raw_bytes) / 1024:.1f} KB")
                     
                     r.set(key, full_text)
                     r.expire(key, ttl)
@@ -138,18 +153,30 @@ class PDFLoader:
             raise
 
     def _extract_text_pdfplumber(self, pdf_path: str) -> str:
-        """Extract text from PDF using pdfplumber."""
+        """Extract text from PDF using pdfplumber with error handling."""
         try:
             with pdfplumber.open(pdf_path) as pdf:
+                if not pdf.pages:
+                    raise ValueError("PDF has no pages")
+                
                 text_parts = []
                 for page_num, page in enumerate(pdf.pages):
-                    text = page.extract_text()
-                    if text:
-                        text_parts.append(f"--- Page {page_num + 1} ---\n{text}")
+                    try:
+                        text = page.extract_text()
+                        if text and text.strip():
+                            text_parts.append(f"--- Page {page_num + 1} ---\n{text}")
+                    except Exception as page_error:
+                        logger.warning(f"Failed to extract page {page_num + 1}: {page_error}")
+                        continue
+                
+                if not text_parts:
+                    raise ValueError("Could not extract text from any page")
+                
                 full_text = "\n\n".join(text_parts)
+                logger.info(f"Successfully extracted {len(text_parts)} pages from PDF")
                 return full_text
         except Exception as e:
-            logger.error(f"Failed to extract text with pdfplumber: {e}")
+            logger.error(f"Failed to extract text from PDF: {e}")
             raise
 
     def extract_text(self, pdf_path: str) -> str:
@@ -304,28 +331,50 @@ class PDFLoader:
     def search_pdf_knowledge(self, query: str, document_id: Optional[str] = None,
                            limit: int = 10, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """
-        Search for relevant PDF knowledge.
+        Search for relevant PDF knowledge with proper user isolation.
 
         Args:
             query: Search query
             document_id: Optional document ID filter
             limit: Maximum results
+            user_id: User ID for isolation
 
         Returns:
             Search results
         """
+        if not self.ltm_manager:
+            logger.warning("LTM manager not configured: cannot search PDF knowledge")
+            return []
         
         metadata_filters = {}
+        if user_id:
+            metadata_filters["user_id"] = user_id
         if document_id:
             metadata_filters["document_id"] = document_id
 
-        return self.ltm_manager.search_memories(
-            query=query or (document_id or ""),
-            memory_type="pdf_knowledge",
-            limit=limit,
-            user_id=user_id,
-            metadata_filters=metadata_filters if metadata_filters else None
-        )
+        search_query = query if query and query.strip() else f"pdf document {document_id or 'content'}"
+
+        try:
+            results = self.ltm_manager.search_memories(
+                query=search_query,
+                memory_type="pdf_knowledge",
+                limit=limit,
+                user_id=user_id,
+                metadata_filters=metadata_filters if metadata_filters else None
+            )
+            
+            filtered_results = []
+            for result in results:
+                result_user_id = result.get("metadata", {}).get("user_id")
+                if user_id and result_user_id != user_id:
+                    logger.warning(f"Skipping result with mismatched user_id: {result_user_id} != {user_id}")
+                    continue
+                filtered_results.append(result)
+            
+            return filtered_results
+        except Exception as e:
+            logger.error(f"Error searching PDF knowledge for user {user_id}: {e}")
+            return []
 
     def get_pdf_documents(self, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """Get list of uploaded PDF documents for a user (if provided)."""

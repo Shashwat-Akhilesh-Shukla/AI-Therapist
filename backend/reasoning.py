@@ -202,7 +202,17 @@ class CognitiveReasoningEngine:
 
         
         pdf_knowledge = recalled_info.get("pdf_knowledge", [])
-        context["knowledge_snippets"] = [m["content"][:300] + "..." for m in pdf_knowledge[:2]]
+        knowledge_snippets = []
+        for item in pdf_knowledge[:2]:
+            # Handle both string snippets and dict items
+            if isinstance(item, str):
+                snippet = item[:300]
+            elif isinstance(item, dict):
+                snippet = item.get("content", str(item))[:300]
+            else:
+                snippet = str(item)[:300]
+            knowledge_snippets.append(snippet)
+        context["knowledge_snippets"] = knowledge_snippets
 
         return context
 
@@ -326,20 +336,27 @@ class CognitiveReasoningEngine:
         """Build the system prompt based on response strategy."""
         base_prompt = "You are CognitiveAI, a helpful AI assistant with memory and knowledge capabilities."
 
-        if strategy == "knowledge_based_answer":
-            base_prompt += " You have access to uploaded documents and should provide accurate information based on that knowledge."
+        # Prioritize PDF knowledge in response strategy
+        knowledge_snippets = context.get("knowledge_snippets", [])
+        has_pdf_knowledge = knowledge_snippets and len(knowledge_snippets) > 0
+        
+        if strategy == "knowledge_based_answer" or (has_pdf_knowledge and strategy != "general_response"):
+            base_prompt += " You have access to uploaded documents and should provide accurate information based on that knowledge. Prioritize information from these documents when answering."
         elif strategy == "memory_storage_acknowledgment":
             base_prompt += " You should acknowledge when storing information in your memory."
         elif strategy == "context_aware_response":
             base_prompt += " You should maintain context from previous conversations and use relevant information."
+        else:
+            base_prompt += " Leverage any uploaded document knowledge when relevant to the user's question."
 
         
         if context.get("user_preferences"):
             base_prompt += f"\n\nUser preferences: {context['user_preferences']}"
 
-        if context.get("knowledge_snippets"):
-            knowledge_text = "\n".join(context["knowledge_snippets"])
-            base_prompt += f"\n\nRelevant knowledge:\n{knowledge_text}"
+        # Front-load PDF knowledge prominently in system prompt
+        if has_pdf_knowledge:
+            knowledge_text = "\n---\n".join(context["knowledge_snippets"])
+            base_prompt = f"{base_prompt}\n\n[DOCUMENT KNOWLEDGE]\n{knowledge_text}\n[END DOCUMENT KNOWLEDGE]\n\nWhen answering, cite specific passages from the documents above when applicable."
 
         return base_prompt
 
@@ -353,26 +370,30 @@ class CognitiveReasoningEngine:
         prompt_parts = []
         prompt_parts.append(f"User message: {user_message}")
 
+        # Prioritize PDF knowledge when available
+        knowledge = context.get("knowledge_snippets", [])
+        if knowledge:
+            prompt_parts.append("[DOCUMENT REFERENCES]\nBased on uploaded documents:\n" + "\n---\n".join(knowledge) + "\n[END REFERENCES]")
         
+        # Then add conversation context
         recent_conv = context.get("recent_conversation", [])
         if recent_conv:
-            prompt_parts.append("Recent conversation context:\n" + "\n".join(recent_conv))
+            prompt_parts.append("Previous conversation context:\n" + "\n".join(recent_conv))
 
         relevant_mem = context.get("relevant_memories", [])
         if relevant_mem:
-            prompt_parts.append("Relevant memories:\n" + "\n".join(relevant_mem))
+            prompt_parts.append("Stored memories:\n" + "\n".join(relevant_mem))
 
-        knowledge = context.get("knowledge_snippets", [])
+        # Build instructions with emphasis on document usage
+        instr_parts = []
+        instr_parts.append(f"Respond in a {response_style} style.")
+        if include_sources or knowledge:
+            instr_parts.append("When citing facts from documents, quote or reference specific passages.")
+        instr_parts.append("Be concise and directly answer the user's question or request.")
         if knowledge:
-            prompt_parts.append("Relevant knowledge snippets:\n" + "\n".join(knowledge))
+            instr_parts.append("Prioritize information from the provided documents when answering.")
 
-        
-        instr = [f"Respond in a {response_style} style."]
-        if include_sources:
-            instr.append("When you cite facts, include the source or mention the document snippet.")
-        instr.append("Be concise and directly answer the user's question or request.")
-
-        prompt_parts.append("Instructions:\n" + " ".join(instr))
+        prompt_parts.append("Instructions:\n" + " ".join(instr_parts))
 
         return "\n\n".join(prompt_parts)
 
