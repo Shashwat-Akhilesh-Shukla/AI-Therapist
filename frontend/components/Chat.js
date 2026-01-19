@@ -33,6 +33,10 @@ export default function Chat({ chats, currentChatId, setCurrentChatId, updateCha
 
     // Build message to display in UI (do NOT include extracted text)
     const displayedMessage = text || (fileInfo ? `Uploaded file: ${fileInfo.filename}` : '')
+
+    // Store the current chat ID before any updates
+    const originalChatId = currentChatId
+
     pushMessage('user', displayedMessage, { file: fileInfo })
     setText('')
 
@@ -63,11 +67,16 @@ export default function Chat({ chats, currentChatId, setCurrentChatId, updateCha
         return
       }
 
+      // Track which conversation ID to use for the AI response
+      let activeConversationId = originalChatId
+
       // If backend created a new conversation, update local state
-      if (j.conversation_id && j.conversation_id !== currentChatId) {
+      if (j.conversation_id && j.conversation_id !== originalChatId) {
         console.log('[send] Backend created new conversation:', j.conversation_id)
+        activeConversationId = j.conversation_id
+
         updateChats(prev => prev.map(c =>
-          c.id === currentChatId
+          c.id === originalChatId
             ? { ...c, id: j.conversation_id, isTemp: false }
             : c
         ))
@@ -75,7 +84,12 @@ export default function Chat({ chats, currentChatId, setCurrentChatId, updateCha
         setCurrentChatId(j.conversation_id)
       }
 
-      pushMessage('ai', j.response || JSON.stringify(j))
+      // Push AI response to the correct conversation
+      updateChats(prev => prev.map(c =>
+        c.id === activeConversationId
+          ? { ...c, messages: [...c.messages, { id: 'm-' + Date.now(), role: 'ai', content: j.response || JSON.stringify(j) }] }
+          : c
+      ))
     } catch (err) {
       pushMessage('ai', 'Error: ' + String(err))
     }
