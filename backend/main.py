@@ -430,52 +430,55 @@ async def logout(user_id: str = Depends(get_current_user)):
     """
     Logout endpoint.
 
-    Clears user's STM and performs cleanup on backend.
+    Clears user's TEMPORARY session data (STM, PDF text) while PRESERVING
+    persistent data (chat history via localStorage, LTM knowledge).
+    
     Frontend should discard token after receiving this.
     """
     try:
+        # Only clear TEMPORARY session data, not persistent memories
         
+        # 1. Clear short-term memory (conversation session data)
         if stm_manager:
             stm_manager.clear_memories(user_id)
+            logger.info(f"Cleared STM for user {user_id}")
 
-        
+        # 2. Clear conversation context (if tracking in reasoning engine)
         if reasoning_engine:
             try:
                 reasoning_engine.clear_short_term_memory_for_user(user_id)
                 reasoning_engine.reset_conversation_context_for_user(user_id)
             except Exception:
-                
+                # Engine is stateless, these are no-ops
                 pass
 
-        
+        # 3. Clear temporary PDF extraction text from Redis
+        # Note: PDF metadata in database is PRESERVED
         try:
             from backend.redis_client import get_redis
             r = get_redis()
             
-            r.delete(f"conv:{user_id}")
-            
+            # Delete temporary PDF extracted text
             pattern = f"pdf:{user_id}:*"
+            deleted_count = 0
             for key in r.scan_iter(match=pattern):
                 try:
                     r.delete(key)
+                    deleted_count += 1
                 except Exception:
                     pass
-        except Exception:
-            
-            pass
+            if deleted_count > 0:
+                logger.info(f"Cleared {deleted_count} temporary PDF extractions for user {user_id}")
+        except Exception as e:
+            logger.warning(f"Could not clear Redis PDF data: {e}")
 
-        
-        if ltm_manager:
-            try:
-                ltm_manager.delete_memories_by_user(user_id)
-            except Exception:
-                logger.warning(f"Failed to delete LTM memories for user {user_id}")
-
-        logger.info(f"User logged out: {user_id}")
+        # DO NOT delete LTM memories - these are persistent and should be preserved
+        # LTM (long-term memories and learned facts) survives logout
+        logger.info(f"User logged out: {user_id} (LTM preserved for persistence)")
 
         return AuthResponse(
             success=True,
-            message="Logout successful. Client must discard the access token; no refresh tokens are used.",
+            message="Logout successful. Client must discard the access token; no refresh tokens are used. Your chat history and learned knowledge are preserved.",
             client_discard_token=True
         )
 
@@ -503,6 +506,30 @@ async def get_current_user_info(user_id: str = Depends(get_current_user)):
         logger.error(f"Error getting user info: {e}")
         raise HTTPException(status_code=500, detail="Failed to get user info")
 
+
+@app.get("/chat_history")
+async def get_chat_history(user_id: str = Depends(get_current_user), limit: int = 100, offset: int = 0):
+    """
+    Retrieve chat history for the current user from SQL database.
+    
+    This endpoint returns all stored conversations so the frontend can
+    display them after logout/login cycles. Chat data is persistent in SQL.
+    """
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    
+    try:
+        chats = db.get_chats_for_user(user_id, limit=limit, offset=offset)
+        logger.info(f"Retrieved {len(chats)} chats for user {user_id}")
+        return {
+            "success": True,
+            "chats": chats,
+            "count": len(chats),
+            "user_id": user_id
+        }
+    except Exception as e:
+        logger.error(f"Failed to retrieve chat history for user {user_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve chat history")
 
 
 
@@ -595,6 +622,18 @@ async def chat(
                         pass
         except Exception:
             pass
+
+        # Store user message and assistant response in SQL for chat history
+        import time
+        try:
+            if db:
+                timestamp = time.time()
+                # Store user message
+                db.add_chat(user_id, "user", request.message, timestamp, metadata={"doc_id": request.doc_id})
+                # Store assistant response
+                db.add_chat(user_id, "assistant", result.get("response", ""), timestamp + 0.001, metadata={"reasoning": result.get("reasoning", {})})
+        except Exception as e:
+            logger.warning(f"Failed to store chat in SQL for user {user_id}: {e}")
 
         return ChatResponse(
             response=result["response"],

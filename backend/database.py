@@ -80,6 +80,17 @@ class Database:
                 )
             ''')
 
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS chats (
+                    chat_id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    timestamp REAL NOT NULL,
+                    metadata TEXT
+                )
+            ''')
+
             conn.commit()
             logger.info(f"Database initialized at {self.db_path}")
 
@@ -182,6 +193,65 @@ class Database:
                 cursor = conn.execute("DELETE FROM pdf_documents WHERE document_id = ?", (document_id,))
             conn.commit()
             return cursor.rowcount > 0
+
+    def add_chat(self, user_id: str, role: str, content: str, timestamp: float, metadata: Optional[Dict[str, Any]] = None) -> str:
+        """Store a chat message in the database. Returns chat_id."""
+        import uuid
+        chat_id = str(uuid.uuid4())
+        meta_json = json.dumps(metadata or {})
+        try:
+            with get_connection(self.db_path) as conn:
+                conn.execute(
+                    "INSERT INTO chats (chat_id, user_id, role, content, timestamp, metadata) VALUES (?, ?, ?, ?, ?, ?)",
+                    (chat_id, user_id, role, content, timestamp, meta_json)
+                )
+                conn.commit()
+            logger.debug(f"Chat stored for user {user_id}: {chat_id}")
+            return chat_id
+        except Exception as e:
+            logger.error(f"Failed to store chat for user {user_id}: {e}")
+            raise
+
+    def get_chats_for_user(self, user_id: str, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
+        """Retrieve chat messages for a user, ordered by timestamp."""
+        try:
+            with get_connection(self.db_path) as conn:
+                rows = conn.execute(
+                    "SELECT chat_id, role, content, timestamp, metadata FROM chats WHERE user_id = ? ORDER BY timestamp ASC LIMIT ? OFFSET ?",
+                    (user_id, limit, offset)
+                ).fetchall()
+            
+            results: List[Dict[str, Any]] = []
+            for r in rows:
+                try:
+                    meta = json.loads(r[4]) if r[4] else {}
+                except Exception:
+                    meta = {}
+                results.append({
+                    "chat_id": r[0],
+                    "role": r[1],
+                    "content": r[2],
+                    "timestamp": r[3],
+                    "metadata": meta
+                })
+            return results
+        except Exception as e:
+            logger.error(f"Failed to retrieve chats for user {user_id}: {e}")
+            return []
+
+    def delete_chats_for_user(self, user_id: str) -> bool:
+        """Delete all chats for a user (scoped deletion, safer than client-side)."""
+        try:
+            with get_connection(self.db_path) as conn:
+                cursor = conn.execute("DELETE FROM chats WHERE user_id = ?", (user_id,))
+                conn.commit()
+            deleted = cursor.rowcount
+            if deleted > 0:
+                logger.info(f"Deleted {deleted} chats for user {user_id}")
+            return deleted > 0
+        except Exception as e:
+            logger.error(f"Failed to delete chats for user {user_id}: {e}")
+            return False
 
 
 
