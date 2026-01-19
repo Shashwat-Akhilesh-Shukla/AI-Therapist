@@ -4,7 +4,7 @@ import Message from './Message'
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL
 console.log('BACKEND_URL in Chat.js:', BACKEND_URL)
 
-export default function Chat({ chats, currentChatId, updateChats, token }) {
+export default function Chat({ chats, currentChatId, setCurrentChatId, updateChats, token }) {
   const [text, setText] = useState('')
   const [attachingFile, setAttachingFile] = useState(null)
   const [uploadProgress, setUploadProgress] = useState(0)
@@ -72,9 +72,7 @@ export default function Chat({ chats, currentChatId, updateChats, token }) {
             : c
         ))
         // Update current chat ID to the new conversation ID
-        if (typeof updateChatId === 'function') {
-          updateChatId(j.conversation_id)
-        }
+        setCurrentChatId(j.conversation_id)
       }
 
       pushMessage('ai', j.response || JSON.stringify(j))

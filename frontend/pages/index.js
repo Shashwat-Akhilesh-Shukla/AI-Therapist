@@ -170,6 +170,7 @@ export default function Home() {
       <Chat
         chats={chats}
         currentChatId={currentChatId}
+        setCurrentChatId={setCurrentChatId}
         updateChats={updateChats}
         token={token}
       />
