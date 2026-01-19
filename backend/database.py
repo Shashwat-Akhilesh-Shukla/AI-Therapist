@@ -81,13 +81,25 @@ class Database:
             ''')
 
             conn.execute('''
-                CREATE TABLE IF NOT EXISTS chats (
-                    chat_id TEXT PRIMARY KEY,
+                CREATE TABLE IF NOT EXISTS conversations (
+                    conversation_id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    title TEXT,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                )
+            ''')
+
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS messages (
+                    message_id TEXT PRIMARY KEY,
+                    conversation_id TEXT NOT NULL,
                     user_id TEXT NOT NULL,
                     role TEXT NOT NULL,
                     content TEXT NOT NULL,
                     timestamp REAL NOT NULL,
-                    metadata TEXT
+                    metadata TEXT,
+                    FOREIGN KEY (conversation_id) REFERENCES conversations(conversation_id)
                 )
             ''')
 
@@ -194,31 +206,146 @@ class Database:
             conn.commit()
             return cursor.rowcount > 0
 
-    def add_chat(self, user_id: str, role: str, content: str, timestamp: float, metadata: Optional[Dict[str, Any]] = None) -> str:
-        """Store a chat message in the database. Returns chat_id."""
+    # Conversation management methods
+    def create_conversation(self, user_id: str, title: Optional[str] = None, created_at: Optional[float] = None, updated_at: Optional[float] = None) -> str:
+        """Create a new conversation. Returns conversation_id."""
         import uuid
-        chat_id = str(uuid.uuid4())
+        import time
+        conversation_id = str(uuid.uuid4())
+        now = time.time()
+        created = created_at or now
+        updated = updated_at or now
+        
+        try:
+            with get_connection(self.db_path) as conn:
+                conn.execute(
+                    "INSERT INTO conversations (conversation_id, user_id, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                    (conversation_id, user_id, title, created, updated)
+                )
+                conn.commit()
+            logger.debug(f"Conversation created for user {user_id}: {conversation_id}")
+            return conversation_id
+        except Exception as e:
+            logger.error(f"Failed to create conversation for user {user_id}: {e}")
+            raise
+
+    def get_conversation(self, conversation_id: str, user_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve a conversation by ID (scoped to user)."""
+        try:
+            with get_connection(self.db_path) as conn:
+                row = conn.execute(
+                    "SELECT conversation_id, user_id, title, created_at, updated_at FROM conversations WHERE conversation_id = ? AND user_id = ?",
+                    (conversation_id, user_id)
+                ).fetchone()
+            
+            if row:
+                return {
+                    "conversation_id": row[0],
+                    "user_id": row[1],
+                    "title": row[2],
+                    "created_at": row[3],
+                    "updated_at": row[4]
+                }
+            return None
+        except Exception as e:
+            logger.error(f"Failed to retrieve conversation {conversation_id}: {e}")
+            return None
+
+    def list_conversations(self, user_id: str, limit: int = 20, offset: int = 0) -> List[Dict[str, Any]]:
+        """List all conversations for a user, ordered by updated_at (most recent first)."""
+        try:
+            with get_connection(self.db_path) as conn:
+                rows = conn.execute(
+                    "SELECT conversation_id, title, created_at, updated_at FROM conversations WHERE user_id = ? ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+                    (user_id, limit, offset)
+                ).fetchall()
+            
+            results: List[Dict[str, Any]] = []
+            for r in rows:
+                results.append({
+                    "conversation_id": r[0],
+                    "title": r[1],
+                    "created_at": r[2],
+                    "updated_at": r[3]
+                })
+            return results
+        except Exception as e:
+            logger.error(f"Failed to list conversations for user {user_id}: {e}")
+            return []
+
+    def update_conversation_title(self, conversation_id: str, title: str) -> bool:
+        """Update conversation title."""
+        try:
+            with get_connection(self.db_path) as conn:
+                cursor = conn.execute(
+                    "UPDATE conversations SET title = ? WHERE conversation_id = ?",
+                    (title, conversation_id)
+                )
+                conn.commit()
+            return cursor.rowcount > 0
+        except Exception as e:
+            logger.error(f"Failed to update conversation title {conversation_id}: {e}")
+            return False
+
+    def update_conversation_timestamp(self, conversation_id: str, updated_at: Optional[float] = None) -> bool:
+        """Update conversation updated_at timestamp."""
+        import time
+        timestamp = updated_at or time.time()
+        try:
+            with get_connection(self.db_path) as conn:
+                cursor = conn.execute(
+                    "UPDATE conversations SET updated_at = ? WHERE conversation_id = ?",
+                    (timestamp, conversation_id)
+                )
+                conn.commit()
+            return cursor.rowcount > 0
+        except Exception as e:
+            logger.error(f"Failed to update conversation timestamp {conversation_id}: {e}")
+            return False
+
+    def delete_conversation(self, conversation_id: str, user_id: str) -> bool:
+        """Delete a conversation and all its messages (scoped to user)."""
+        try:
+            with get_connection(self.db_path) as conn:
+                # Delete messages first
+                conn.execute("DELETE FROM messages WHERE conversation_id = ? AND user_id = ?", (conversation_id, user_id))
+                # Delete conversation
+                cursor = conn.execute("DELETE FROM conversations WHERE conversation_id = ? AND user_id = ?", (conversation_id, user_id))
+                conn.commit()
+            deleted = cursor.rowcount
+            if deleted > 0:
+                logger.info(f"Deleted conversation {conversation_id} for user {user_id}")
+            return deleted > 0
+        except Exception as e:
+            logger.error(f"Failed to delete conversation {conversation_id}: {e}")
+            return False
+
+    # Message management methods
+    def add_message(self, conversation_id: str, user_id: str, role: str, content: str, timestamp: float, metadata: Optional[Dict[str, Any]] = None) -> str:
+        """Store a message in a conversation. Returns message_id."""
+        import uuid
+        message_id = str(uuid.uuid4())
         meta_json = json.dumps(metadata or {})
         try:
             with get_connection(self.db_path) as conn:
                 conn.execute(
-                    "INSERT INTO chats (chat_id, user_id, role, content, timestamp, metadata) VALUES (?, ?, ?, ?, ?, ?)",
-                    (chat_id, user_id, role, content, timestamp, meta_json)
+                    "INSERT INTO messages (message_id, conversation_id, user_id, role, content, timestamp, metadata) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (message_id, conversation_id, user_id, role, content, timestamp, meta_json)
                 )
                 conn.commit()
-            logger.debug(f"Chat stored for user {user_id}: {chat_id}")
-            return chat_id
+            logger.debug(f"Message stored in conversation {conversation_id}: {message_id}")
+            return message_id
         except Exception as e:
-            logger.error(f"Failed to store chat for user {user_id}: {e}")
+            logger.error(f"Failed to store message in conversation {conversation_id}: {e}")
             raise
 
-    def get_chats_for_user(self, user_id: str, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
-        """Retrieve chat messages for a user, ordered by timestamp."""
+    def get_messages_for_conversation(self, conversation_id: str, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
+        """Retrieve messages for a conversation, ordered by timestamp."""
         try:
             with get_connection(self.db_path) as conn:
                 rows = conn.execute(
-                    "SELECT chat_id, role, content, timestamp, metadata FROM chats WHERE user_id = ? ORDER BY timestamp ASC LIMIT ? OFFSET ?",
-                    (user_id, limit, offset)
+                    "SELECT message_id, role, content, timestamp, metadata FROM messages WHERE conversation_id = ? ORDER BY timestamp ASC LIMIT ? OFFSET ?",
+                    (conversation_id, limit, offset)
                 ).fetchall()
             
             results: List[Dict[str, Any]] = []
@@ -228,7 +355,7 @@ class Database:
                 except Exception:
                     meta = {}
                 results.append({
-                    "chat_id": r[0],
+                    "message_id": r[0],
                     "role": r[1],
                     "content": r[2],
                     "timestamp": r[3],
@@ -236,21 +363,21 @@ class Database:
                 })
             return results
         except Exception as e:
-            logger.error(f"Failed to retrieve chats for user {user_id}: {e}")
+            logger.error(f"Failed to retrieve messages for conversation {conversation_id}: {e}")
             return []
 
-    def delete_chats_for_user(self, user_id: str) -> bool:
-        """Delete all chats for a user (scoped deletion, safer than client-side)."""
+    def delete_messages_for_user(self, user_id: str) -> bool:
+        """Delete all messages for a user (scoped deletion)."""
         try:
             with get_connection(self.db_path) as conn:
-                cursor = conn.execute("DELETE FROM chats WHERE user_id = ?", (user_id,))
+                cursor = conn.execute("DELETE FROM messages WHERE user_id = ?", (user_id,))
                 conn.commit()
             deleted = cursor.rowcount
             if deleted > 0:
-                logger.info(f"Deleted {deleted} chats for user {user_id}")
+                logger.info(f"Deleted {deleted} messages for user {user_id}")
             return deleted > 0
         except Exception as e:
-            logger.error(f"Failed to delete chats for user {user_id}: {e}")
+            logger.error(f"Failed to delete messages for user {user_id}: {e}")
             return False
 
 

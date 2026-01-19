@@ -26,6 +26,7 @@ from backend.pdf_loader import PDFLoader
 from backend.reasoning import CognitiveReasoningEngine
 from backend.database import get_database, Database, User
 from backend.auth import AuthService
+from backend.conversations import ConversationManager
 
 
 logging.basicConfig(level=logging.INFO)
@@ -64,6 +65,7 @@ ltm_manager: Optional[LTMManager] = None
 pdf_loader: Optional[PDFLoader] = None
 reasoning_engine: Optional[CognitiveReasoningEngine] = None
 db: Optional[Database] = None
+conversation_manager: Optional[ConversationManager] = None
 
 
 
@@ -98,12 +100,14 @@ class AuthResponse(BaseModel):
 class ChatRequest(BaseModel):
     """Request model for chat endpoint."""
     message: str
+    conversation_id: Optional[str] = None
     doc_id: Optional[str] = None
 
 
 class ChatResponse(BaseModel):
     """Response model for chat endpoint."""
     response: str
+    conversation_id: str
     reasoning: Dict[str, Any]
     metadata: Dict[str, Any]
 
@@ -176,7 +180,7 @@ def validate_environment():
 
 def initialize_memory_systems():
     """Initialize global memory systems and reasoning engine."""
-    global stm_manager, ltm_manager, pdf_loader, reasoning_engine, db
+    global stm_manager, ltm_manager, pdf_loader, reasoning_engine, db, conversation_manager
 
     try:
         jwt_secret = os.getenv("JWT_SECRET_KEY")
@@ -226,6 +230,9 @@ def initialize_memory_systems():
             pdf_loader=pdf_loader,
             perplexity_api_key=perplexity_api_key or ""
         )
+
+        # Initialize conversation manager
+        conversation_manager = ConversationManager(db)
 
         logger.info("Memory systems initialized successfully")
 
@@ -507,29 +514,136 @@ async def get_current_user_info(user_id: str = Depends(get_current_user)):
         raise HTTPException(status_code=500, detail="Failed to get user info")
 
 
-@app.get("/chat_history")
-async def get_chat_history(user_id: str = Depends(get_current_user), limit: int = 100, offset: int = 0):
+@app.get("/conversations")
+async def list_conversations(
+    user_id: str = Depends(get_current_user),
+    limit: int = 20,
+    offset: int = 0
+):
     """
-    Retrieve chat history for the current user from SQL database.
+    List all conversations for the current user.
     
-    This endpoint returns all stored conversations so the frontend can
-    display them after logout/login cycles. Chat data is persistent in SQL.
+    Returns conversations ordered by most recent first (updated_at DESC).
+    Each conversation includes title, timestamps, and conversation_id.
     """
-    if not db:
-        raise HTTPException(status_code=503, detail="Database not initialized")
+    if not conversation_manager:
+        raise HTTPException(status_code=503, detail="Conversation manager not initialized")
     
     try:
-        chats = db.get_chats_for_user(user_id, limit=limit, offset=offset)
-        logger.info(f"Retrieved {len(chats)} chats for user {user_id}")
+        conversations = conversation_manager.list_conversations(user_id, limit=limit, offset=offset)
+        logger.info(f"Retrieved {len(conversations)} conversations for user {user_id}")
         return {
             "success": True,
-            "chats": chats,
-            "count": len(chats),
-            "user_id": user_id
+            "conversations": conversations,
+            "count": len(conversations)
         }
     except Exception as e:
-        logger.error(f"Failed to retrieve chat history for user {user_id}: {e}")
-        raise HTTPException(status_code=500, detail="Failed to retrieve chat history")
+        logger.error(f"Failed to list conversations for user {user_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to list conversations")
+
+
+@app.get("/conversations/{conversation_id}/messages")
+async def get_conversation_messages(
+    conversation_id: str,
+    user_id: str = Depends(get_current_user),
+    limit: int = 100,
+    offset: int = 0
+):
+    """
+    Get all messages for a specific conversation.
+    
+    Returns messages ordered by timestamp (oldest first).
+    Verifies that the conversation belongs to the requesting user.
+    """
+    if not conversation_manager or not db:
+        raise HTTPException(status_code=503, detail="Services not initialized")
+    
+    try:
+        # Verify conversation belongs to user
+        conversation = conversation_manager.get_conversation(conversation_id, user_id)
+        if not conversation:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        
+        # Get messages for this conversation
+        messages = db.get_messages_for_conversation(conversation_id, limit=limit, offset=offset)
+        logger.info(f"Retrieved {len(messages)} messages for conversation {conversation_id}")
+        
+        return {
+            "success": True,
+            "conversation": conversation,
+            "messages": messages,
+            "count": len(messages)
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to retrieve messages for conversation {conversation_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve conversation messages")
+
+
+@app.delete("/conversations/{conversation_id}")
+async def delete_conversation(
+    conversation_id: str,
+    user_id: str = Depends(get_current_user)
+):
+    """
+    Delete a conversation and all its messages.
+    
+    Verifies that the conversation belongs to the requesting user.
+    """
+    if not conversation_manager:
+        raise HTTPException(status_code=503, detail="Conversation manager not initialized")
+    
+    try:
+        success = conversation_manager.delete_conversation(conversation_id, user_id)
+        if not success:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        
+        return {
+            "success": True,
+            "message": "Conversation deleted successfully"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to delete conversation {conversation_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to delete conversation")
+
+
+@app.patch("/conversations/{conversation_id}")
+async def update_conversation(
+    conversation_id: str,
+    title: str,
+    user_id: str = Depends(get_current_user)
+):
+    """
+    Update conversation title.
+    
+    Verifies that the conversation belongs to the requesting user.
+    """
+    if not conversation_manager:
+        raise HTTPException(status_code=503, detail="Conversation manager not initialized")
+    
+    try:
+        # Verify conversation belongs to user
+        conversation = conversation_manager.get_conversation(conversation_id, user_id)
+        if not conversation:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        
+        # Update title
+        success = conversation_manager.update_conversation_title(conversation_id, title)
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to update title")
+        
+        return {
+            "success": True,
+            "message": "Conversation title updated successfully"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to update conversation {conversation_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update conversation")
 
 
 
@@ -623,20 +737,53 @@ async def chat(
         except Exception:
             pass
 
-        # Store user message and assistant response in SQL for chat history
+        # Conversation management: create new or continue existing
         import time
+        try:
+            if not request.conversation_id:
+                # Create new conversation
+                if not conversation_manager:
+                    raise HTTPException(status_code=503, detail="Conversation manager not initialized")
+                
+                conversation_id = conversation_manager.create_conversation(user_id)
+                logger.info(f"Created new conversation {conversation_id} for user {user_id}")
+                
+                # Generate title from first message
+                title = conversation_manager.generate_title_from_message(request.message)
+                conversation_manager.update_conversation_title(conversation_id, title)
+                logger.info(f"Set conversation title: {title}")
+            else:
+                # Continue existing conversation
+                conversation_id = request.conversation_id
+                
+                # Verify conversation belongs to user
+                conversation = conversation_manager.get_conversation(conversation_id, user_id)
+                if not conversation:
+                    raise HTTPException(status_code=404, detail="Conversation not found")
+                
+                # Update conversation timestamp
+                conversation_manager.update_conversation_timestamp(conversation_id)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Conversation management error: {e}")
+            raise HTTPException(status_code=500, detail="Failed to manage conversation")
+
+        # Store user message and assistant response in SQL for chat history
         try:
             if db:
                 timestamp = time.time()
                 # Store user message
-                db.add_chat(user_id, "user", request.message, timestamp, metadata={"doc_id": request.doc_id})
+                db.add_message(conversation_id, user_id, "user", request.message, timestamp, metadata={"doc_id": request.doc_id})
                 # Store assistant response
-                db.add_chat(user_id, "assistant", result.get("response", ""), timestamp + 0.001, metadata={"reasoning": result.get("reasoning", {})})
+                db.add_message(conversation_id, user_id, "assistant", result.get("response", ""), timestamp + 0.001, metadata={"reasoning": result.get("reasoning", {})})
+                logger.debug(f"Stored messages in conversation {conversation_id}")
         except Exception as e:
-            logger.warning(f"Failed to store chat in SQL for user {user_id}: {e}")
+            logger.warning(f"Failed to store messages in SQL for user {user_id}: {e}")
 
         return ChatResponse(
             response=result["response"],
+            conversation_id=conversation_id,
             reasoning=result.get("reasoning", {}),
             metadata={**result.get("metadata", {}), "user_id": user_id}
         )
