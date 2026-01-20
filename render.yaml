@@ -1,0 +1,43 @@
+services:
+  - type: web
+    name: ai-therapist
+    env: docker
+    plan: free
+    region: oregon
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    
+    # Health check configuration
+    healthCheckPath: /health
+    
+    # Environment variables (set these in Render dashboard)
+    envVars:
+      - key: PERPLEXITY_API_KEY
+        sync: false
+      - key: PINECONE_API_KEY
+        sync: false
+      - key: PINECONE_ENVIRONMENT
+        value: us-west4-gcp-free
+      - key: REDIS_URL
+        sync: false
+      - key: JWT_SECRET_KEY
+        generateValue: true
+      - key: STM_TTL
+        value: "3600"
+      - key: JINA_API_KEY
+        sync: false
+      - key: FRONTEND_URL
+        value: https://ai-therapist.onrender.com
+      - key: NODE_ENV
+        value: production
+      - key: PYTHONUNBUFFERED
+        value: "1"
+    
+    # Auto-deploy on git push
+    autoDeploy: true
+    
+    # Build command (uses Dockerfile)
+    # No need to specify, Render will use Dockerfile automatically
+    
+    # Start command (defined in Dockerfile CMD)
+    # No need to specify, uses Dockerfile CMD

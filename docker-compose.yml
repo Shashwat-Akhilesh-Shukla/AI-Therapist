@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  ai-therapist:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"  # Frontend
+      - "8000:8000"  # Backend API
+    environment:
+      - PERPLEXITY_API_KEY=${PERPLEXITY_API_KEY}
+      - PINECONE_API_KEY=${PINECONE_API_KEY}
+      - PINECONE_ENVIRONMENT=${PINECONE_ENVIRONMENT:-us-west4-gcp-free}
+      - REDIS_URL=${REDIS_URL}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - STM_TTL=${STM_TTL:-3600}
+      - JINA_API_KEY=${JINA_API_KEY}
+      - FRONTEND_URL=http://localhost:3000
+      - NODE_ENV=production
+      - PYTHONUNBUFFERED=1
+    volumes:
+      # Mount for SQLite database persistence (optional)
+      - ./data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  data:
+    driver: local
