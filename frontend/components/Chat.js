@@ -4,12 +4,13 @@ import Message from './Message'
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL
 console.log('BACKEND_URL in Chat.js:', BACKEND_URL)
 
-export default function Chat({ chats, currentChatId, setCurrentChatId, updateChats, token }) {
+export default function Chat({ chats, currentChatId, setCurrentChatId, updateChats, token, onStreamComplete }) {
   const [text, setText] = useState('')
   const [attachingFile, setAttachingFile] = useState(null)
   const [uploadProgress, setUploadProgress] = useState(0)
   const [error, setError] = useState('')
   const [fileInfo, setFileInfo] = useState(null)
+  const [isStreaming, setIsStreaming] = useState(false)
   const inputRef = useRef(null)
   const messagesRef = useRef(null)
 
@@ -18,7 +19,7 @@ export default function Chat({ chats, currentChatId, setCurrentChatId, updateCha
   useEffect(() => { if (currentChatId && !current) console.warn('No current chat') }, [currentChatId])
 
   function pushMessage(role, content, extra = {}) {
-    updateChats(prev => prev.map(c => c.id === currentChatId ? { ...c, messages: [...c.messages, { id: 'm-' + Date.now(), role, content, ...extra }] } : c))
+    updateChats(prev => prev.map(c => c.id === currentChatId ? { ...c, messages: [...c.messages, { id: role + '-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9), role, content, ...extra }] } : c))
   }
 
   useEffect(() => {
@@ -30,6 +31,7 @@ export default function Chat({ chats, currentChatId, setCurrentChatId, updateCha
   async function send() {
     console.log('[send] called', { text, fileInfo: fileInfo ? { filename: fileInfo.filename } : null })
     if (!text && !fileInfo) return
+    if (isStreaming) return // Prevent sending while streaming
 
     // Build message to display in UI (do NOT include extracted text)
     const displayedMessage = text || (fileInfo ? `Uploaded file: ${fileInfo.filename}` : '')
@@ -51,9 +53,31 @@ export default function Chat({ chats, currentChatId, setCurrentChatId, updateCha
 
     if (fileInfo && fileInfo.doc_id) { payload.doc_id = fileInfo.doc_id }
 
-    // Call backend chat with authorization token
+
+    // Create placeholder AI message for streaming with guaranteed unique ID
+    const aiMessageId = 'ai-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9)
+    console.log(`[send] Creating AI message ${aiMessageId} in chat ${currentChatId}`)
+    updateChats(prev => prev.map(c => c.id === currentChatId ? { ...c, messages: [...c.messages, { id: aiMessageId, role: 'ai', content: '', streaming: true }] } : c))
+
+    setIsStreaming(true)
+
+    // Helper function to update only the chat containing our specific message
+    // This prevents updates from affecting other chats even if IDs match
+    const updateMessageInChat = (updateFn) => {
+      updateChats(prev => prev.map(c => {
+        // Find the chat that contains our message
+        const hasMessage = c.messages.some(m => m.id === aiMessageId)
+        if (hasMessage) {
+          console.log(`[updateMessageInChat] Updating message ${aiMessageId} in chat ${c.id}`)
+          return updateFn(c)
+        }
+        return c
+      }))
+    }
+
+    // Call backend streaming chat endpoint
     try {
-      const res = await fetch(`${BACKEND_URL}/chat`, {
+      const res = await fetch(`${BACKEND_URL}/chat/stream`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -61,37 +85,109 @@ export default function Chat({ chats, currentChatId, setCurrentChatId, updateCha
         },
         body: JSON.stringify(payload)
       })
-      const j = await res.json()
+
       if (!res.ok) {
-        pushMessage('ai', 'Error: ' + (j.detail || j.message || 'Chat failed'))
+        const errorText = await res.text()
+        updateMessageInChat(c => ({
+          ...c,
+          messages: c.messages.map(m =>
+            m.id === aiMessageId ? { ...m, content: 'Error: ' + errorText, streaming: false } : m
+          )
+        }))
+        setIsStreaming(false)
         return
       }
 
-      // Track which conversation ID to use for the AI response
-      let activeConversationId = originalChatId
+      // Read streaming response
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      let fullResponse = ''
 
-      // If backend created a new conversation, update local state
-      if (j.conversation_id && j.conversation_id !== originalChatId) {
-        console.log('[send] Backend created new conversation:', j.conversation_id)
-        activeConversationId = j.conversation_id
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
 
-        updateChats(prev => prev.map(c =>
-          c.id === originalChatId
-            ? { ...c, id: j.conversation_id, isTemp: false }
-            : c
-        ))
-        // Update current chat ID to the new conversation ID
-        setCurrentChatId(j.conversation_id)
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() // Keep incomplete line in buffer
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(line.slice(6))
+
+              if (data.type === 'chunk') {
+                // Append chunk to message - update only the chat containing this message
+                fullResponse += data.content
+                updateMessageInChat(c => ({
+                  ...c,
+                  messages: c.messages.map(m =>
+                    m.id === aiMessageId ? { ...m, content: fullResponse } : m
+                  )
+                }))
+              } else if (data.type === 'done') {
+                // Stream complete, update conversation ID if new
+                if (data.conversation_id && data.conversation_id !== originalChatId) {
+                  console.log('[send] Backend created new conversation:', data.conversation_id)
+                  const newConversationId = data.conversation_id
+
+                  // Update the chat ID and mark as not temp - only for the chat with our message
+                  updateChats(prev => prev.map(c => {
+                    const hasMessage = c.messages.some(m => m.id === aiMessageId)
+                    if (hasMessage) {
+                      console.log(`[send] Updating chat ID from ${c.id} to ${newConversationId}`)
+                      return { ...c, id: newConversationId, isTemp: false }
+                    }
+                    return c
+                  }))
+
+                  // Update current chat ID only if we're still viewing this chat
+                  if (currentChatId === originalChatId) {
+                    setCurrentChatId(newConversationId)
+                  }
+                }
+
+                // Mark message as complete
+                updateMessageInChat(c => ({
+                  ...c,
+                  messages: c.messages.map(m =>
+                    m.id === aiMessageId ? { ...m, streaming: false } : m
+                  )
+                }))
+
+                // Trigger message reload from backend to sync state
+                if (onStreamComplete && data.conversation_id) {
+                  console.log('[send] Triggering message reload after streaming complete')
+                  // Small delay to ensure backend has finished writing
+                  setTimeout(() => {
+                    onStreamComplete(data.conversation_id)
+                  }, 100)
+                }
+              } else if (data.type === 'error') {
+                updateMessageInChat(c => ({
+                  ...c,
+                  messages: c.messages.map(m =>
+                    m.id === aiMessageId ? { ...m, content: 'Error: ' + data.message, streaming: false } : m
+                  )
+                }))
+              }
+            } catch (e) {
+              console.error('[send] Failed to parse SSE data:', e)
+            }
+          }
+        }
       }
-
-      // Push AI response to the correct conversation
-      updateChats(prev => prev.map(c =>
-        c.id === activeConversationId
-          ? { ...c, messages: [...c.messages, { id: 'm-' + Date.now(), role: 'ai', content: j.response || JSON.stringify(j) }] }
-          : c
-      ))
     } catch (err) {
-      pushMessage('ai', 'Error: ' + String(err))
+      console.error('[send] Streaming error:', err)
+      updateMessageInChat(c => ({
+        ...c,
+        messages: c.messages.map(m =>
+          m.id === aiMessageId ? { ...m, content: 'Error: ' + String(err), streaming: false } : m
+        )
+      }))
+    } finally {
+      setIsStreaming(false)
     }
   }
 
@@ -201,8 +297,9 @@ export default function Chat({ chats, currentChatId, setCurrentChatId, updateCha
           onChange={(e) => setText(e.target.value)}
           placeholder={attachingFile ? `Attached: ${attachingFile.name}` : 'Type a message...'}
           onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } }}
+          disabled={isStreaming}
         />
-        <button className="btn send" onClick={send}>Send</button>
+        <button className="btn send" onClick={send} disabled={isStreaming}>{isStreaming ? 'Streaming...' : 'Send'}</button>
       </div>
     </main>
   )

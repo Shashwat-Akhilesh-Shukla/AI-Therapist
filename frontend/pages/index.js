@@ -22,6 +22,21 @@ export default function Home() {
     setLoading(false)
   }, [])
 
+  // Load messages when switching to a different chat
+  useEffect(() => {
+    if (!currentChatId || !token) return
+
+    const chat = chats.find(c => c.id === currentChatId)
+
+    // Only load if:
+    // 1. Chat exists
+    // 2. It's not a temporary chat
+    // 3. Messages haven't been loaded yet
+    if (chat && !chat.isTemp && !chat.messagesLoaded) {
+      loadMessages(currentChatId)
+    }
+  }, [currentChatId, token, chats])
+
   // Load conversations from backend when authenticated
   useEffect(() => {
     if (!token) return
@@ -35,17 +50,10 @@ export default function Home() {
 
         if (!res.ok) {
           console.error('Failed to load conversations')
-          // Fallback to local storage
-          const raw = localStorage.getItem('cognitiveai_chats')
-          if (raw) {
-            const parsed = JSON.parse(raw)
-            setChats(parsed)
-            if (parsed.length) setCurrentChatId(parsed[0].id)
-          } else {
-            const initial = [{ id: 'temp-' + Date.now(), title: 'New chat', messages: [], isTemp: true }]
-            setChats(initial)
-            setCurrentChatId(initial[0].id)
-          }
+          // Create a temporary chat if backend fails
+          const initial = [{ id: 'temp-' + Date.now(), title: 'New chat', messages: [], isTemp: true }]
+          setChats(initial)
+          setCurrentChatId(initial[0].id)
           return
         }
 
@@ -57,6 +65,7 @@ export default function Home() {
             id: conv.conversation_id,
             title: conv.title || 'Untitled conversation',
             messages: [], // Load messages on demand
+            messagesLoaded: false, // Track if messages have been loaded
             created_at: conv.created_at,
             updated_at: conv.updated_at
           }))
@@ -103,16 +112,18 @@ export default function Home() {
 
       const data = await res.json()
 
-      // Update chat with messages
+      // Update chat with messages and mark as loaded
       setChats(prev => prev.map(c =>
         c.id === conversationId
           ? {
-            ...c, messages: data.messages.map(m => ({
+            ...c,
+            messages: data.messages.map(m => ({
               id: m.message_id,
               role: m.role,
               content: m.content,
               timestamp: m.timestamp
-            }))
+            })),
+            messagesLoaded: true
           }
           : c
       ))
@@ -124,11 +135,8 @@ export default function Home() {
   const updateChats = (updater) => {
     setChats((prevChats) => {
       const next = typeof updater === 'function' ? updater(prevChats) : updater
-      try {
-        localStorage.setItem('cognitiveai_chats', JSON.stringify(next))
-      } catch (e) {
-        console.warn('Failed to persist chats', e)
-      }
+      // Note: We no longer persist chats to localStorage
+      // Messages are fetched from backend database on demand
       return next
     })
   }
@@ -173,6 +181,7 @@ export default function Home() {
         setCurrentChatId={setCurrentChatId}
         updateChats={updateChats}
         token={token}
+        onStreamComplete={loadMessages}
       />
     </div>
   )

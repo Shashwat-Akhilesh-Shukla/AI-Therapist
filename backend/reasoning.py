@@ -256,15 +256,16 @@ class CognitiveReasoningEngine:
         
         return stm_count > 0 and ltm_count > 0
 
-    async def _generate_response(self, response_plan: Dict[str, Any], processed_input: Dict[str, Any], recalled_info: Dict[str, Any]) -> str:
+    async def _generate_response(self, response_plan: Dict[str, Any], processed_input: Dict[str, Any], recalled_info: Dict[str, Any], stream: bool = False):
         """
         Generate the actual response using the Perplexity API.
 
         Args:
             response_plan: The planned response strategy and context
+            stream: If True, yields chunks as they arrive (async generator)
 
         Returns:
-            Generated response string
+            Generated response string (if stream=False) or async generator of chunks (if stream=True)
         """
         strategy = response_plan.get("strategy", "general_response")
         context = response_plan.get("context_to_use", {})
@@ -287,13 +288,19 @@ class CognitiveReasoningEngine:
                 {"role": "user", "content": user_prompt}
             ],
             "max_tokens": 4000,
-            "temperature": 0.7
+            "temperature": 0.7,
+            "stream": stream
         }
 
-        timeout_seconds = 20.0
+        timeout_seconds = 60.0 if stream else 20.0
         max_retries = 2
         attempt = 0
 
+        if stream:
+            # Return async generator for streaming
+            return self._stream_response(url, headers, payload, max_retries)
+        
+        # Original non-streaming logic
         async with httpx.AsyncClient() as client:
             while True:
                 attempt += 1
@@ -331,6 +338,70 @@ class CognitiveReasoningEngine:
                 except Exception as e:
                     logger.error(f"Error generating response: {e}")
                     return "I apologize, but I'm having trouble generating a response right now. Please try again."
+
+
+    async def _stream_response(self, url: str, headers: Dict[str, str], payload: Dict[str, Any], max_retries: int):
+        """
+        Stream response chunks from Perplexity API.
+        
+        Yields:
+            String chunks as they arrive from the API
+        """
+        attempt = 0
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            while True:
+                attempt += 1
+                try:
+                    async with client.stream("POST", url, headers=headers, json=payload) as resp:
+                        if resp.status_code == 429:
+                            retry_after = resp.headers.get("Retry-After")
+                            wait = int(retry_after) if retry_after and retry_after.isdigit() else (2 ** attempt)
+                            if attempt <= max_retries:
+                                await asyncio.sleep(wait)
+                                continue
+                            else:
+                                logger.error(f"Perplexity returned 429 too many times")
+                                yield "I'm being rate limited. Please try again later."
+                                return
+
+                        if 500 <= resp.status_code < 600:
+                            if attempt <= max_retries:
+                                await asyncio.sleep(1 + attempt)
+                                continue
+                            else:
+                                logger.error(f"Perplexity server error {resp.status_code}")
+                                yield "I'm having trouble contacting the knowledge service; please try again later."
+                                return
+
+                        resp.raise_for_status()
+                        
+                        # Parse SSE stream
+                        async for line in resp.aiter_lines():
+                            if line.startswith("data: "):
+                                data = line[6:]  # Remove "data: " prefix
+                                if data.strip() == "[DONE]":
+                                    return
+                                try:
+                                    chunk = json.loads(data)
+                                    delta = chunk.get("choices", [{}])[0].get("delta", {})
+                                    content = delta.get("content", "")
+                                    if content:
+                                        yield content
+                                except json.JSONDecodeError:
+                                    continue
+                        return
+
+                except httpx.RequestError as e:
+                    logger.warning(f"Perplexity streaming request error (attempt {attempt}): {e}")
+                    if attempt <= max_retries:
+                        await asyncio.sleep(1 + attempt)
+                        continue
+                    yield "I apologize, but I'm having trouble generating a response right now. Please try again."
+                    return
+                except Exception as e:
+                    logger.error(f"Error streaming response: {e}")
+                    yield "I apologize, but I'm having trouble generating a response right now. Please try again."
+                    return
 
     def _build_system_prompt(self, strategy: str, context: Dict[str, Any]) -> str:
         """Build the system prompt based on response strategy."""

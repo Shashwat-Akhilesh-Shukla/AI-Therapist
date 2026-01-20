@@ -1,0 +1,149 @@
+  async function send() {
+    console.log('[send] called', { text, fileInfo: fileInfo ? { filename: fileInfo.filename } : null })
+    if (!text && !fileInfo) return
+    if (isStreaming) return // Prevent sending while streaming
+
+    // Build message to display in UI (do NOT include extracted text)
+    const displayedMessage = text || (fileInfo ? `Uploaded file: ${fileInfo.filename}` : '')
+
+    // Store the current chat ID before any updates
+    const originalChatId = currentChatId
+
+    pushMessage('user', displayedMessage, { file: fileInfo })
+    setText('')
+
+    // Prepare payload for backend — include conversation_id and doc_id
+    const payload = { message: displayedMessage }
+
+    // Pass conversation_id if not a temporary chat
+    const currentChat = chats.find(c => c.id === currentChatId)
+    if (currentChat && !currentChat.isTemp) {
+      payload.conversation_id = currentChatId
+    }
+
+    if (fileInfo && fileInfo.doc_id) { payload.doc_id = fileInfo.doc_id }
+
+    // Create placeholder AI message for streaming with unique ID
+    const aiMessageId = 'm-' + Date.now()
+    updateChats(prev => prev.map(c => c.id === currentChatId ? { ...c, messages: [...c.messages, { id: aiMessageId, role: 'ai', content: '', streaming: true }] } : c))
+
+    setIsStreaming(true)
+
+    // Helper function to update only the chat containing our specific message
+    // This prevents updates from affecting other chats even if IDs match
+    const updateMessageInChat = (updateFn) => {
+      updateChats(prev => prev.map(c => {
+        // Find the chat that contains our message
+        const hasMessage = c.messages.some(m => m.id === aiMessageId)
+        if (hasMessage) {
+          return updateFn(c)
+        }
+        return c
+      }))
+    }
+
+    // Call backend streaming chat endpoint
+    try {
+      const res = await fetch(`${BACKEND_URL}/chat/stream`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify(payload)
+      })
+
+      if (!res.ok) {
+        const errorText = await res.text()
+        updateMessageInChat(c => ({
+          ...c,
+          messages: c.messages.map(m => 
+            m.id === aiMessageId ? { ...m, content: 'Error: ' + errorText, streaming: false } : m
+          )
+        }))
+        setIsStreaming(false)
+        return
+      }
+
+      // Read streaming response
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      let fullResponse = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() // Keep incomplete line in buffer
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(line.slice(6))
+
+              if (data.type === 'chunk') {
+                // Append chunk to message - update only the chat containing this message
+                fullResponse += data.content
+                updateMessageInChat(c => ({
+                  ...c,
+                  messages: c.messages.map(m => 
+                    m.id === aiMessageId ? { ...m, content: fullResponse } : m
+                  )
+                }))
+              } else if (data.type === 'done') {
+                // Stream complete, update conversation ID if new
+                if (data.conversation_id && data.conversation_id !== originalChatId) {
+                  console.log('[send] Backend created new conversation:', data.conversation_id)
+                  const newConversationId = data.conversation_id
+                  
+                  // Update the chat ID and mark as not temp - only for the chat with our message
+                  updateChats(prev => prev.map(c => {
+                    const hasMessage = c.messages.some(m => m.id === aiMessageId)
+                    if (hasMessage && c.id === originalChatId) {
+                      return { ...c, id: newConversationId, isTemp: false }
+                    }
+                    return c
+                  }))
+                  
+                  // Update current chat ID only if we're still viewing this chat
+                  if (currentChatId === originalChatId) {
+                    setCurrentChatId(newConversationId)
+                  }
+                }
+                
+                // Mark message as complete
+                updateMessageInChat(c => ({
+                  ...c,
+                  messages: c.messages.map(m => 
+                    m.id === aiMessageId ? { ...m, streaming: false } : m
+                  )
+                }))
+              } else if (data.type === 'error') {
+                updateMessageInChat(c => ({
+                  ...c,
+                  messages: c.messages.map(m => 
+                    m.id === aiMessageId ? { ...m, content: 'Error: ' + data.message, streaming: false } : m
+                  )
+                }))
+              }
+            } catch (e) {
+              console.error('[send] Failed to parse SSE data:', e)
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.error('[send] Streaming error:', err)
+      updateMessageInChat(c => ({
+        ...c,
+        messages: c.messages.map(m => 
+          m.id === aiMessageId ? { ...m, content: 'Error: ' + String(err), streaming: false } : m
+        )
+      }))
+    } finally {
+      setIsStreaming(false)
+    }
+  }

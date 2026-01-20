@@ -6,11 +6,13 @@ All data is strictly isolated per user.
 """
 
 import os
+import json
 import tempfile
 from typing import Dict, Any, List, Optional
 from pathlib import Path
 from datetime import datetime
 from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Depends, Header
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
 import uvicorn
@@ -796,6 +798,154 @@ async def chat(
 
 
 
+
+@app.post("/chat/stream")
+async def chat_stream(
+    request: ChatRequest,
+    user_id: str = Depends(get_current_user)
+):
+    """
+    Streaming chat endpoint (user-scoped).
+    
+    Streams response chunks as Server-Sent Events (SSE) for progressive rendering.
+    All data is isolated to the authenticated user.
+    """
+    if not reasoning_engine:
+        raise HTTPException(status_code=503, detail="Reasoning engine not initialized")
+
+    async def generate_stream():
+        """Generate SSE stream with response chunks and metadata."""
+        full_response = ""
+        conversation_id = None
+        
+        try:
+            # Retrieve memories (same as regular chat)
+            stm_list = []
+            try:
+                if stm_manager:
+                    raw_stm = stm_manager.get_relevant_memories(user_id, request.message, limit=5)
+                    for m in raw_stm:
+                        try:
+                            stm_list.append({
+                                "id": getattr(m, "id", None),
+                                "content": getattr(m, "content", str(m)),
+                                "timestamp": getattr(m, "timestamp", time.time()),
+                                "importance": getattr(m, "importance", 1.0),
+                                "metadata": getattr(m, "metadata", {})
+                            })
+                        except Exception:
+                            stm_list.append({"content": str(m)})
+            except Exception:
+                stm_list = []
+
+            ltm_list = []
+            try:
+                if ltm_manager:
+                    ltm_list = ltm_manager.search_memories(request.message, limit=5, user_id=user_id)
+            except Exception:
+                ltm_list = []
+
+            pdf_snippets = []
+            try:
+                if pdf_loader:
+                    if request.doc_id:
+                        chunks = pdf_loader.search_pdf_knowledge(query=request.message, document_id=request.doc_id, limit=3, user_id=user_id)
+                    else:
+                        chunks = pdf_loader.search_pdf_knowledge(query=request.message, limit=3, user_id=user_id)
+                    for c in chunks:
+                        content = c.get("content", "")[:300]
+                        pdf_snippets.append(content)
+            except Exception:
+                pdf_snippets = []
+
+            # Process input and plan response
+            processed_input = reasoning_engine._process_input(request.message, user_id)
+            recalled_info = {
+                "stm_memories": stm_list,
+                "ltm_memories": ltm_list,
+                "pdf_knowledge": pdf_snippets,
+                "user_profile": {}
+            }
+            response_plan = reasoning_engine._plan_response(processed_input, recalled_info)
+
+            # Stream response chunks
+            response_generator = await reasoning_engine._generate_response(
+                response_plan, processed_input, recalled_info, stream=True
+            )
+            
+            async for chunk in response_generator:
+                full_response += chunk
+                # Send chunk as SSE
+                yield f"data: {json.dumps({'type': 'chunk', 'content': chunk})}\n\n"
+
+            # Determine memory actions
+            memory_actions = reasoning_engine._determine_memory_actions(
+                request.message, full_response, recalled_info, response_plan, user_id
+            )
+
+            # Execute memory actions
+            try:
+                for action in memory_actions:
+                    if not isinstance(action, dict):
+                        continue
+                    if action.get("type") == "stm" and stm_manager:
+                        try:
+                            stm_manager.add_memory(user_id, action.get("content", ""), importance=action.get("importance", 0.8))
+                        except Exception:
+                            pass
+                    elif action.get("type") == "ltm" and ltm_manager:
+                        try:
+                            ltm_manager.add_memory(
+                                action.get("content", ""),
+                                memory_type=action.get("memory_type", "note"),
+                                metadata=action.get("metadata", {"user_id": user_id}),
+                                importance=action.get("importance", 0.7),
+                                user_id=user_id
+                            )
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+            # Conversation management
+            try:
+                if not request.conversation_id:
+                    if not conversation_manager:
+                        raise HTTPException(status_code=503, detail="Conversation manager not initialized")
+                    
+                    conversation_id = conversation_manager.create_conversation(user_id)
+                    logger.info(f"Created new conversation {conversation_id} for user {user_id}")
+                    
+                    title = conversation_manager.generate_title_from_message(request.message)
+                    conversation_manager.update_conversation_title(conversation_id, title)
+                else:
+                    conversation_id = request.conversation_id
+                    conversation = conversation_manager.get_conversation(conversation_id, user_id)
+                    if not conversation:
+                        raise HTTPException(status_code=404, detail="Conversation not found")
+                    conversation_manager.update_conversation_timestamp(conversation_id)
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.error(f"Conversation management error: {e}")
+
+            # Store messages in database
+            try:
+                if db:
+                    timestamp = time.time()
+                    db.add_message(conversation_id, user_id, "user", request.message, timestamp, metadata={"doc_id": request.doc_id})
+                    db.add_message(conversation_id, user_id, "assistant", full_response, timestamp + 0.001, metadata={"reasoning": response_plan})
+            except Exception as e:
+                logger.warning(f"Failed to store messages in SQL for user {user_id}: {e}")
+
+            # Send final metadata event
+            yield f"data: {json.dumps({'type': 'done', 'conversation_id': conversation_id})}\n\n"
+
+        except Exception as e:
+            logger.error(f"Streaming chat error for user {user_id}: {e}")
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+    return StreamingResponse(generate_stream(), media_type="text/event-stream")
 
 
 
