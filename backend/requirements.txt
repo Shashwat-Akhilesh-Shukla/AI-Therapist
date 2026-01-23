@@ -17,4 +17,12 @@ pinecone
 numpy
 pdfplumber
 
+# Voice Processing Dependencies
+faster-whisper>=0.10.0
+TTS>=0.22.0
+torch>=2.0.0
+torchaudio>=2.0.0
+pydub>=0.25.1
+soundfile>=0.12.1
+
 python-bcrypt; platform_system == "DO_NOT_INSTALL"

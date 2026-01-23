@@ -11,7 +11,7 @@ import tempfile
 from typing import Dict, Any, List, Optional
 from pathlib import Path
 from datetime import datetime
-from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Depends, Header
+from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Depends, Header, WebSocket, WebSocketDisconnect, Query
 from fastapi.responses import StreamingResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -30,6 +30,8 @@ from backend.reasoning import CognitiveReasoningEngine
 from backend.database import get_database, Database, User
 from backend.auth import AuthService
 from backend.conversations import ConversationManager
+from backend.voice.websocket_handler import VoiceWebSocketHandler
+from backend.voice.model_manager import ModelManager
 
 
 logging.basicConfig(level=logging.INFO)
@@ -56,6 +58,7 @@ pdf_loader: Optional[PDFLoader] = None
 reasoning_engine: Optional[CognitiveReasoningEngine] = None
 db: Optional[Database] = None
 conversation_manager: Optional[ConversationManager] = None
+voice_handler: Optional[VoiceWebSocketHandler] = None
 
 
 
@@ -170,7 +173,7 @@ def validate_environment():
 
 def initialize_memory_systems():
     """Initialize global memory systems and reasoning engine."""
-    global stm_manager, ltm_manager, pdf_loader, reasoning_engine, db, conversation_manager
+    global stm_manager, ltm_manager, pdf_loader, reasoning_engine, db, conversation_manager, voice_handler
 
     try:
         jwt_secret = os.getenv("JWT_SECRET_KEY")
@@ -224,6 +227,16 @@ def initialize_memory_systems():
         # Initialize conversation manager
         conversation_manager = ConversationManager(db)
 
+        # Initialize voice WebSocket handler
+        voice_handler = VoiceWebSocketHandler(
+            reasoning_engine=reasoning_engine,
+            conversation_manager=conversation_manager,
+            database=db,
+            stm_manager=stm_manager,
+            ltm_manager=ltm_manager,
+            pdf_loader=pdf_loader
+        )
+
         logger.info("Memory systems initialized successfully")
 
     except Exception as e:
@@ -237,6 +250,16 @@ async def startup_event():
     try:
         validate_environment()
         initialize_memory_systems()
+        
+        # Optionally preload voice models (can be slow, so disabled by default)
+        # Uncomment to preload models on startup:
+        # if os.getenv("VOICE_PRELOAD_MODELS", "false").lower() == "true":
+        #     try:
+        #         logger.info("Preloading voice models...")
+        #         ModelManager.preload_models()
+        #     except Exception as e:
+        #         logger.warning(f"Failed to preload voice models: {e}")
+        
         logger.info("✓ Startup complete: All systems initialized and validated")
     except RuntimeError as e:
         logger.critical(f"✗ Startup failed: {e}")
@@ -1239,6 +1262,122 @@ async def system_stats(user_id: str = Depends(get_current_user)):
     except Exception as e:
         logger.error(f"Error getting system stats: {e}")
         raise HTTPException(status_code=500, detail="System stats failed")
+
+
+# ============================================================================
+# VOICE AGENT ENDPOINTS
+# ============================================================================
+
+@app.websocket("/ws/voice")
+async def voice_websocket_endpoint(
+    websocket: WebSocket,
+    token: str = Query(..., description="JWT authentication token")
+):
+    """
+    WebSocket endpoint for real-time voice chat.
+    
+    Protocol:
+    - Client → Server: {"type": "audio", "data": "<base64_audio>"}
+    - Server → Client: {"type": "status", "state": "listening|processing|speaking", "message": "..."}
+    - Server → Client: {"type": "transcript", "text": "...", "language": "en"}
+    - Server → Client: {"type": "audio", "data": "<base64_audio>", "format": "wav"}
+    - Server → Client: {"type": "error", "message": "...", "code": "..."}
+    - Server → Client: {"type": "conversation_update", "conversation_id": "...", "title": "..."}
+    
+    Query Parameters:
+    - token: JWT authentication token
+    """
+    if not voice_handler:
+        await websocket.close(code=1011, reason="Voice functionality not available")
+        return
+    
+    # Verify token
+    try:
+        payload = AuthService.verify_token(token)
+        if not payload:
+            await websocket.close(code=1008, reason="Invalid or expired token")
+            return
+        
+        user_id = payload.get("user_id")
+        if not user_id:
+            await websocket.close(code=1008, reason="Token missing user_id")
+            return
+    
+    except Exception as e:
+        logger.error(f"Token verification failed: {e}")
+        await websocket.close(code=1008, reason="Authentication failed")
+        return
+    
+    # Handle the voice session
+    try:
+        await voice_handler.handle_connection(
+            websocket=websocket,
+            user_id=user_id,
+            conversation_id=None  # Will be created or continued within the session
+        )
+    except Exception as e:
+        logger.error(f"Voice session error: {e}")
+        try:
+            await websocket.close(code=1011, reason=f"Session error: {str(e)}")
+        except Exception:
+            pass
+
+
+@app.get("/voice/info")
+async def get_voice_info(user_id: str = Depends(get_current_user)):
+    """
+    Get voice functionality information and status.
+    
+    Returns model info, capabilities, and current session stats.
+    """
+    try:
+        model_info = ModelManager.get_model_info()
+        
+        # Get active session info
+        session_info = {
+            'active_sessions': voice_handler.get_session_count() if voice_handler else 0,
+            'session_ids': voice_handler.get_active_sessions() if voice_handler else []
+        }
+        
+        return {
+            'voice_enabled': model_info.get('voice_enabled', False),
+            'models': model_info,
+            'sessions': session_info,
+            'capabilities': {
+                'stt': model_info.get('stt_loaded', False),
+                'tts': model_info.get('tts_loaded', False),
+                'streaming': True,
+                'languages': ['en']  # Can be expanded based on model capabilities
+            }
+        }
+    
+    except Exception as e:
+        logger.error(f"Error getting voice info: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get voice info")
+
+
+@app.post("/voice/preload")
+async def preload_voice_models(user_id: str = Depends(get_current_user)):
+    """
+    Preload voice models (STT and TTS).
+    
+    This endpoint can be called to warm up the models before first use.
+    Useful for reducing latency on first voice interaction.
+    """
+    try:
+        logger.info(f"Preloading voice models for user {user_id}")
+        ModelManager.preload_models()
+        
+        return {
+            'success': True,
+            'message': 'Voice models preloaded successfully',
+            'model_info': ModelManager.get_model_info()
+        }
+    
+    except Exception as e:
+        logger.error(f"Failed to preload voice models: {e}")
+        raise HTTPException(status_code=500, detail=f"Model preload failed: {str(e)}")
+
 
 
 if __name__ == "__main__":
