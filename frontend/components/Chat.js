@@ -342,9 +342,31 @@ export default function Chat({ chats, currentChatId, setCurrentChatId, updateCha
         setVoiceState('idle')
       }
 
-      // Initialize MediaRecorder
+      // Initialize MediaRecorder with supported MIME type
+      // Try different MIME types in order of preference
+      const mimeTypes = [
+        'audio/webm;codecs=opus',
+        'audio/webm',
+        'audio/ogg;codecs=opus',
+        'audio/mp4',
+        'audio/mpeg'
+      ]
+
+      let selectedMimeType = ''
+      for (const mimeType of mimeTypes) {
+        if (MediaRecorder.isTypeSupported(mimeType)) {
+          selectedMimeType = mimeType
+          console.log('[Voice] Using MIME type:', mimeType)
+          break
+        }
+      }
+
+      if (!selectedMimeType) {
+        throw new Error('No supported audio MIME type found for MediaRecorder')
+      }
+
       const mediaRecorder = new MediaRecorder(stream, {
-        mimeType: 'audio/webm;codecs=opus'
+        mimeType: selectedMimeType
       })
       mediaRecorderRef.current = mediaRecorder
 
