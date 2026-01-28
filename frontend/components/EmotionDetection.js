@@ -13,7 +13,45 @@ export default function EmotionDetection({ isOpen, onClose, onEmotionDetected })
   const detectionIntervalRef = useRef(null)
   const faceApiRef = useRef(null)
 
-  // Load face-api from CDN
+  // Cleanup function to stop camera
+  const stopCamera = () => {
+    console.log('[EmotionDetection] Stopping camera...')
+
+    // Stop all tracks in the stream
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(track => {
+        track.stop()
+        console.log('[EmotionDetection] Stopped track:', track.kind)
+      })
+      streamRef.current = null
+    }
+
+    // Also check video element
+    if (videoRef.current && videoRef.current.srcObject) {
+      videoRef.current.srcObject.getTracks().forEach(track => {
+        track.stop()
+        console.log('[EmotionDetection] Stopped video track:', track.kind)
+      })
+      videoRef.current.srcObject = null
+    }
+
+    // Clear detection interval
+    if (detectionIntervalRef.current) {
+      clearInterval(detectionIntervalRef.current)
+      detectionIntervalRef.current = null
+    }
+
+    setDetectionActive(false)
+    console.log('[EmotionDetection] Camera stopped successfully')
+  }
+
+  // Enhanced close handler
+  const handleClose = () => {
+    stopCamera()
+    setIsMinimized(false)
+    onClose()
+  }
+
   useEffect(() => {
     const loadFaceAPI = async () => {
       try {
@@ -50,7 +88,10 @@ export default function EmotionDetection({ isOpen, onClose, onEmotionDetected })
 
   // Initialize webcam
   useEffect(() => {
-    if (!isOpen) return
+    if (!isOpen) {
+      stopCamera()
+      return
+    }
 
     const initWebcam = async () => {
       try {
@@ -76,18 +117,9 @@ export default function EmotionDetection({ isOpen, onClose, onEmotionDetected })
 
     initWebcam()
 
+    // Cleanup when component unmounts or isOpen changes
     return () => {
-      // Cleanup: stop webcam stream
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach(track => track.stop())
-      }
-      if (videoRef.current && videoRef.current.srcObject) {
-        videoRef.current.srcObject.getTracks().forEach(track => track.stop())
-      }
-      if (detectionIntervalRef.current) {
-        clearInterval(detectionIntervalRef.current)
-      }
-      setDetectionActive(false)
+      stopCamera()
       setIsMinimized(false)
     }
   }, [isOpen])
@@ -232,7 +264,7 @@ export default function EmotionDetection({ isOpen, onClose, onEmotionDetected })
             >
               {isMinimized ? '▲' : '▼'}
             </button>
-            <button className="close-button" onClick={onClose}>×</button>
+            <button className="close-button" onClick={handleClose}>×</button>
           </div>
         </div>
 
@@ -274,7 +306,7 @@ export default function EmotionDetection({ isOpen, onClose, onEmotionDetected })
         </div>
 
         <div className={`emotion-detection-footer ${isMinimized ? 'minimized-content' : ''}`}>
-          <button className="emotion-close-btn" onClick={onClose}>
+          <button className="emotion-close-btn" onClick={handleClose}>
             Close
           </button>
         </div>
