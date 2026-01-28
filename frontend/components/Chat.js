@@ -221,18 +221,28 @@ export default function Chat({ chats, currentChatId, setCurrentChatId, updateCha
       xhr.setRequestHeader('Authorization', `Bearer ${token}`)
       console.log('[uploadFileWithProgress] XHR opened')
 
+      let progressStarted = false
+      const progressTimeout = setTimeout(() => {
+        if (!progressStarted) {
+          console.log('[uploadFileWithProgress] No progress events, using fallback')
+          onProgress(50) // Show 50% while uploading if no events
+        }
+      }, 500)
+
       xhr.upload.onprogress = function (e) {
+        progressStarted = true
         if (e.lengthComputable) {
           const pct = Math.round((e.loaded / e.total) * 100)
           console.log('[xhr.progress]', pct + '%')
           onProgress(pct)
         } else {
           console.log('[xhr.progress] indeterminate')
-          onProgress(5)
+          onProgress(50)
         }
       }
 
       xhr.onload = function () {
+        clearTimeout(progressTimeout)
         console.log('[xhr.onload]', xhr.status, xhr.responseText.substring(0, 100))
         if (xhr.status >= 200 && xhr.status < 300) {
           try { onProgress(100) } catch (e) { }
@@ -243,6 +253,7 @@ export default function Chat({ chats, currentChatId, setCurrentChatId, updateCha
       }
 
       xhr.onerror = function () {
+        clearTimeout(progressTimeout)
         console.error('[xhr.onerror]')
         reject(new Error('Network error during upload'))
       }
@@ -311,28 +322,37 @@ export default function Chat({ chats, currentChatId, setCurrentChatId, updateCha
       ws.onmessage = async (event) => {
         try {
           const data = JSON.parse(event.data)
-          console.log('[Voice] Received:', data.type)
+          console.log('[Voice] Received from backend:', { type: data.type, hasText: !!data.text })
 
           if (data.type === 'transcript') {
+            console.log('[Voice] Transcript received:', data.text)
             setVoiceTranscript(data.text)
             // Add user message to chat
             pushMessage('user', data.text)
+            // Clear transcript display after showing it
+            setTimeout(() => setVoiceTranscript(''), 2000)
           } else if (data.type === 'audio') {
+            console.log('[Voice] Audio response received, queuing for playback')
             // Queue audio for playback
             const audioData = Uint8Array.from(atob(data.data), c => c.charCodeAt(0))
-            audioQueueRef.current.push(audioData)
-            playNextAudio()
+            audioQueueRef.current.push({ buffer: audioData.buffer })
+            if (!isPlayingRef.current) {
+              playNextAudio()
+            }
           } else if (data.type === 'status') {
+            console.log('[Voice] Status update:', data.state, data.message)
             setVoiceState(data.state)
           } else if (data.type === 'response') {
+            console.log('[Voice] LLM response received:', data.text)
             // Add AI response to chat
             pushMessage('ai', data.text)
           } else if (data.type === 'error') {
+            console.error('[Voice] Backend error:', data.message)
             setError('Voice error: ' + data.message)
             setVoiceState('idle')
           }
         } catch (e) {
-          console.error('[Voice] Failed to parse message:', e)
+          console.error('[Voice] Failed to parse message:', e, 'Raw data:', event.data)
         }
       }
 
@@ -359,12 +379,23 @@ export default function Chat({ chats, currentChatId, setCurrentChatId, updateCha
           const reader = new FileReader()
           reader.onloadend = () => {
             const base64 = reader.result.split(',')[1]
+            console.log(`[Voice] Sending audio chunk: ${base64.length} bytes`)
             ws.send(JSON.stringify({
               type: 'audio',
               data: base64
             }))
           }
           reader.readAsDataURL(event.data)
+        }
+      }
+
+      mediaRecorder.onstop = () => {
+        console.log('[Voice] Recording stopped, sending stop signal to backend')
+        // Send stop signal to backend to process remaining audio
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({
+            type: 'stop'
+          }))
         }
       }
 
@@ -430,7 +461,8 @@ export default function Chat({ chats, currentChatId, setCurrentChatId, updateCha
     isPlayingRef.current = true
     setVoiceState('speaking')
 
-    const audioData = audioQueueRef.current.shift()
+    const audioItem = audioQueueRef.current.shift()
+    const audioData = audioItem.buffer || audioItem
 
     try {
       // Initialize audio context if needed
@@ -439,20 +471,25 @@ export default function Chat({ chats, currentChatId, setCurrentChatId, updateCha
       }
 
       const audioContext = audioContextRef.current
-      const audioBuffer = await audioContext.decodeAudioData(audioData.buffer)
+      console.log('[Voice] Decoding audio data, buffer size:', audioData.byteLength)
+      
+      const audioBuffer = await audioContext.decodeAudioData(audioData)
       const source = audioContext.createBufferSource()
       source.buffer = audioBuffer
       source.connect(audioContext.destination)
 
       source.onended = () => {
+        console.log('[Voice] Audio playback finished')
         isPlayingRef.current = false
         if (audioQueueRef.current.length > 0) {
           playNextAudio()
         } else {
+          console.log('[Voice] No more audio, returning to idle')
           setVoiceState('idle')
         }
       }
 
+      console.log('[Voice] Starting audio playback')
       source.start(0)
     } catch (err) {
       console.error('[Voice] Audio playback error:', err)
