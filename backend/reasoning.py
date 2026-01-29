@@ -412,37 +412,82 @@ class CognitiveReasoningEngine:
                     return
 
     def _build_system_prompt(self, strategy: str, context: Dict[str, Any]) -> str:
-        """Build the system prompt based on response strategy."""
-        base_prompt = "You are CognitiveAI, a helpful AI assistant with memory and knowledge capabilities."
+    """Build the system prompt based on response strategy."""
 
-        # Prioritize PDF knowledge in response strategy
-        knowledge_snippets = context.get("knowledge_snippets", [])
-        has_pdf_knowledge = knowledge_snippets and len(knowledge_snippets) > 0
-        
-        if strategy == "knowledge_based_answer" or (has_pdf_knowledge and strategy != "general_response"):
-            base_prompt += " You have access to uploaded documents and should provide accurate information based on that knowledge. Prioritize information from these documents when answering."
-        elif strategy == "memory_storage_acknowledgment":
-            base_prompt += " You should acknowledge when storing information in your memory."
-        elif strategy == "context_aware_response":
-            base_prompt += " You should maintain context from previous conversations and use relevant information."
-        else:
-            base_prompt += " Leverage any uploaded document knowledge when relevant to the user's question."
+    base_prompt = """You are a compassionate, professional therapist providing emotional support and mental health guidance. Your role is to help users explore their feelings, develop coping strategies, and work through challenges in a safe, non-judgmental environment.
 
-        
-        if context.get("user_preferences"):
-            base_prompt += f"\n\nUser preferences: {context['user_preferences']}"
+CORE THERAPEUTIC PRINCIPLES:
+1. Active Listening & Empathy: Acknowledge and validate the user's feelings and experiences
+2. Non-Judgmental Support: Create a safe space where users feel heard and accepted
+3. Collaborative Approach: Work WITH the user, not prescribe TO them
+4. Strength-Based: Help users recognize their own resilience and capabilities
+5. Cultural Sensitivity: Respect diverse backgrounds, beliefs, and experiences
 
-        # Front-load PDF knowledge prominently in system prompt
-        if has_pdf_knowledge:
-            knowledge_text = "\n---\n".join(context["knowledge_snippets"])
-            base_prompt = f"{base_prompt}\n\n[DOCUMENT KNOWLEDGE]\n{knowledge_text}\n[END DOCUMENT KNOWLEDGE]\n\nWhen answering, cite specific passages from the documents above when applicable."
+COMMUNICATION STYLE:
+- Use warm, conversational, natural language
+- Speak in complete, flowing sentences like a real therapist would
+- Ask open-ended questions to encourage reflection
+- Reflect emotions back to help users process feelings
+- Use "I" statements when appropriate (e.g., "I hear that you're feeling...")
+- Be genuine and authentic in your responses
 
-        # Add User Emotion Context
-        user_emotion = context.get("user_emotion", "neutral")
-        if user_emotion and user_emotion != "neutral":
-             base_prompt += f"\n\n[USER EMOTIONAL STATE]: {user_emotion}\nThe user currently appears to be feeling {user_emotion}. Acknowledge this emotion subtly in your response tone."
+CRITICAL - RESPONSE FORMAT:
+- Write in PLAIN, NATURAL LANGUAGE ONLY
+- DO NOT use markdown formatting
+- DO NOT include citations or references
+- DO NOT use special characters for emphasis
+- Write as if you're speaking directly to the person in a therapy session
 
-        return base_prompt
+ETHICAL BOUNDARIES & SAFETY:
+- You are a supportive tool, not a replacement for licensed professionals
+- You cannot diagnose or prescribe
+- Encourage professional help when appropriate
+
+THERAPEUTIC TECHNIQUES TO USE:
+- Reflective listening
+- Validation
+- Open-ended questions
+- Cognitive reframing
+- Practical coping strategies
+- Empowerment
+
+REMEMBER:
+- Healing is not linear
+- Small steps matter
+- The user is the expert on their own life
+- You are here to support, not to fix
+"""
+
+    # --- Knowledge Snippets (PDF / RAG Context) ---
+    knowledge_snippets = context.get("knowledge_snippets", [])
+    if knowledge_snippets:
+        knowledge_text = "\n---\n".join(knowledge_snippets)
+        base_prompt += f"""
+
+You have access to the following background information that may be relevant to the conversation.
+When it is helpful, integrate this knowledge naturally into your responses, without citing sources or referencing documents.
+
+{knowledge_text}
+"""
+
+    # --- User Emotional State Context ---
+    user_emotion = context.get("user_emotion", "neutral")
+    if user_emotion and user_emotion != "neutral":
+        base_prompt += f"""
+
+The user currently appears to be feeling {user_emotion}.
+Let this awareness subtly guide your tone, empathy, and emotional validation, without explicitly labeling or announcing the emotion.
+"""
+
+    # --- User Preferences / Personal Context ---
+    if context.get("user_preferences"):
+        base_prompt += f"""
+
+Additional user context to keep in mind while responding:
+{context['user_preferences']}
+"""
+
+    return base_prompt
 
     def _build_user_prompt(self, response_plan: Dict[str, Any], processed_input: Dict[str, Any], recalled_info: Dict[str, Any]) -> str:
         """Build the user prompt for the LLM using the real user message and selected context."""

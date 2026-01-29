@@ -3,6 +3,7 @@ import Message from './Message'
 import VoiceVisualizer from './VoiceVisualizer'
 import VoiceModeToggle from './VoiceModeToggle'
 import EmotionDetection from './EmotionDetection'
+import { cleanResponse } from '../utils/responseCleaner'
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL
 console.log('BACKEND_URL in Chat.js:', BACKEND_URL)
@@ -205,11 +206,11 @@ export default function Chat({ chats, currentChatId, setCurrentChatId, updateCha
                   }
                 }
 
-                // Mark message as complete
+                // Mark message as complete and clean the response
                 updateMessageInChat(c => ({
                   ...c,
                   messages: c.messages.map(m =>
-                    m.id === aiMessageId ? { ...m, streaming: false } : m
+                    m.id === aiMessageId ? { ...m, content: cleanResponse(fullResponse), streaming: false } : m
                   )
                 }))
 
@@ -535,6 +536,14 @@ export default function Chat({ chats, currentChatId, setCurrentChatId, updateCha
     audioQueueRef.current = []
   }
 
+  function toggleRecording() {
+    if (isRecording) {
+      stopRecording()
+    } else {
+      startRecording()
+    }
+  }
+
   function startRecording() {
     if (!mediaRecorderRef.current || isRecording) return
 
@@ -568,6 +577,14 @@ export default function Chat({ chats, currentChatId, setCurrentChatId, updateCha
     setVoiceState('processing')
 
     mediaRecorderRef.current.stop()
+
+    // Send stop message to backend to trigger processing
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'stop'
+      }))
+      console.log('[Voice] Sent stop message to backend')
+    }
   }
 
   async function playNextAudio() {
@@ -650,13 +667,10 @@ export default function Chat({ chats, currentChatId, setCurrentChatId, updateCha
           <div className="voice-controls">
             <button
               className={`voice-record-btn ${isRecording ? 'recording' : ''}`}
-              onMouseDown={startRecording}
-              onMouseUp={stopRecording}
-              onTouchStart={startRecording}
-              onTouchEnd={stopRecording}
+              onClick={toggleRecording}
               disabled={voiceState === 'processing' || voiceState === 'speaking'}
             >
-              {isRecording ? '🔴 Recording...' : '🎤 Hold to Talk'}
+              {isRecording ? '⏹️ Stop Recording' : '🎤 Start Recording'}
             </button>
           </div>
         </div>

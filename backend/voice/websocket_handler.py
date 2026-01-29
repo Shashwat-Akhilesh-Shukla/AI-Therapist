@@ -47,8 +47,8 @@ class VoiceSession:
         
         # Audio processing
         self.audio_buffer = AudioBuffer(
-            chunk_duration=float(os.getenv("AUDIO_CHUNK_DURATION", "3.0")),
-            max_duration=float(os.getenv("MAX_AUDIO_DURATION", "60.0"))
+            chunk_duration=float(os.getenv("AUDIO_CHUNK_DURATION", "3.0")),  # Not used for auto-processing anymore
+            max_duration=float(os.getenv("MAX_AUDIO_DURATION", "300.0"))  # 5 minutes max
         )
         self.audio_processor = AudioProcessor()
         self.audio_validator = AudioValidator()
@@ -311,7 +311,7 @@ class VoiceWebSocketHandler:
             audio_bytes = session.audio_processor.base64_to_bytes(audio_data_b64)
             logger.debug(f"Received audio chunk: {len(audio_bytes)} bytes from {session.user_id}")
             
-            # Add to buffer
+            # Add to buffer (don't process automatically)
             session.audio_buffer.add(audio_bytes)
             buffer_duration = session.audio_buffer.get_duration()
             buffer_chunks = session.audio_buffer.get_chunk_count()

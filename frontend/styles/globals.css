@@ -294,7 +294,18 @@ body {
   border-radius: 12px;
   background: var(--ai-bg);
   color: var(--ai-text);
+  
+  /* Text wrapping and overflow handling */
   word-wrap: break-word;
+  word-break: break-word;
+  overflow-wrap: break-word;
+  
+  /* Preserve whitespace and newlines while allowing wrapping */
+  white-space: pre-wrap;
+  
+  /* Prevent text from overflowing container */
+  overflow: hidden;
+  
   box-shadow: var(--shadow-sm);
   line-height: 1.6;
 }
