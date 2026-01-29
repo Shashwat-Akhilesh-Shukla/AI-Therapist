@@ -32,6 +32,7 @@ from backend.auth import AuthService
 from backend.conversations import ConversationManager
 from backend.voice.websocket_handler import VoiceWebSocketHandler
 from backend.voice.model_manager import ModelManager
+from backend.response_cleaner import clean_response
 
 
 logging.basicConfig(level=logging.INFO)
@@ -798,20 +799,23 @@ async def chat(
             logger.error(f"Conversation management error: {e}")
             raise HTTPException(status_code=500, detail="Failed to manage conversation")
 
+        # Clean the response before storing and returning
+        cleaned_response = clean_response(result.get("response", ""))
+        
         # Store user message and assistant response in SQL for chat history
         try:
             if db:
                 timestamp = time.time()
                 # Store user message
                 db.add_message(conversation_id, user_id, "user", request.message, timestamp, metadata={"doc_id": request.doc_id})
-                # Store assistant response
-                db.add_message(conversation_id, user_id, "assistant", result.get("response", ""), timestamp + 0.001, metadata={"reasoning": result.get("reasoning", {})})
+                # Store cleaned assistant response
+                db.add_message(conversation_id, user_id, "assistant", cleaned_response, timestamp + 0.001, metadata={"reasoning": result.get("reasoning", {})})
                 logger.debug(f"Stored messages in conversation {conversation_id}")
         except Exception as e:
             logger.warning(f"Failed to store messages in SQL for user {user_id}: {e}")
 
         return ChatResponse(
-            response=result["response"],
+            response=cleaned_response,
             conversation_id=conversation_id,
             reasoning=result.get("reasoning", {}),
             metadata={**result.get("metadata", {}), "user_id": user_id}
@@ -901,8 +905,10 @@ async def chat_stream(
             )
             
             async for chunk in response_generator:
+                # Stream raw chunks without cleaning to preserve spacing
+                # Cleaning will happen on the full response before database storage
                 full_response += chunk
-                # Send chunk as SSE
+                # Send raw chunk as SSE
                 yield f"data: {json.dumps({'type': 'chunk', 'content': chunk})}\n\n"
 
             # Determine memory actions
@@ -956,12 +962,15 @@ async def chat_stream(
             except Exception as e:
                 logger.error(f"Conversation management error: {e}")
 
-            # Store messages in database
+            # Clean the FULL response before storing in database
+            cleaned_full_response = clean_response(full_response)
+
+            # Store messages in database with cleaned response
             try:
                 if db:
                     timestamp = time.time()
                     db.add_message(conversation_id, user_id, "user", request.message, timestamp, metadata={"doc_id": request.doc_id})
-                    db.add_message(conversation_id, user_id, "assistant", full_response, timestamp + 0.001, metadata={"reasoning": response_plan})
+                    db.add_message(conversation_id, user_id, "assistant", cleaned_full_response, timestamp + 0.001, metadata={"reasoning": response_plan})
             except Exception as e:
                 logger.warning(f"Failed to store messages in SQL for user {user_id}: {e}")
 

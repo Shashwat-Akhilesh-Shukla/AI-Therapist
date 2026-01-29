@@ -3,6 +3,7 @@ import Message from './Message'
 import VoiceVisualizer from './VoiceVisualizer'
 import VoiceModeToggle from './VoiceModeToggle'
 import EmotionDetection from './EmotionDetection'
+import { cleanResponse } from '../utils/responseCleaner'
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL
 console.log('BACKEND_URL in Chat.js:', BACKEND_URL)
@@ -167,11 +168,11 @@ export default function Chat({ chats, currentChatId, setCurrentChatId, updateCha
                   }
                 }
 
-                // Mark message as complete
+                // Mark message as complete and clean the response
                 updateMessageInChat(c => ({
                   ...c,
                   messages: c.messages.map(m =>
-                    m.id === aiMessageId ? { ...m, streaming: false } : m
+                    m.id === aiMessageId ? { ...m, content: cleanResponse(fullResponse), streaming: false } : m
                   )
                 }))
 
