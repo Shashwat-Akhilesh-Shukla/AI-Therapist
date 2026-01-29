@@ -463,6 +463,14 @@ export default function Chat({ chats, currentChatId, setCurrentChatId, updateCha
     audioQueueRef.current = []
   }
 
+  function toggleRecording() {
+    if (isRecording) {
+      stopRecording()
+    } else {
+      startRecording()
+    }
+  }
+
   function startRecording() {
     if (!mediaRecorderRef.current || isRecording) return
 
@@ -496,6 +504,14 @@ export default function Chat({ chats, currentChatId, setCurrentChatId, updateCha
     setVoiceState('processing')
 
     mediaRecorderRef.current.stop()
+
+    // Send stop message to backend to trigger processing
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'stop'
+      }))
+      console.log('[Voice] Sent stop message to backend')
+    }
   }
 
   async function playNextAudio() {
@@ -572,13 +588,10 @@ export default function Chat({ chats, currentChatId, setCurrentChatId, updateCha
           <div className="voice-controls">
             <button
               className={`voice-record-btn ${isRecording ? 'recording' : ''}`}
-              onMouseDown={startRecording}
-              onMouseUp={stopRecording}
-              onTouchStart={startRecording}
-              onTouchEnd={stopRecording}
+              onClick={toggleRecording}
               disabled={voiceState === 'processing' || voiceState === 'speaking'}
             >
-              {isRecording ? '🔴 Recording...' : '🎤 Hold to Talk'}
+              {isRecording ? '⏹️ Stop Recording' : '🎤 Start Recording'}
             </button>
           </div>
         </div>

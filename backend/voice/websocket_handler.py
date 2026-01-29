@@ -47,8 +47,8 @@ class VoiceSession:
         
         # Audio processing
         self.audio_buffer = AudioBuffer(
-            chunk_duration=float(os.getenv("AUDIO_CHUNK_DURATION", "3.0")),
-            max_duration=float(os.getenv("MAX_AUDIO_DURATION", "60.0"))
+            chunk_duration=float(os.getenv("AUDIO_CHUNK_DURATION", "3.0")),  # Not used for auto-processing anymore
+            max_duration=float(os.getenv("MAX_AUDIO_DURATION", "300.0"))  # 5 minutes max
         )
         self.audio_processor = AudioProcessor()
         self.audio_validator = AudioValidator()
@@ -309,12 +309,12 @@ class VoiceWebSocketHandler:
             # Decode audio
             audio_bytes = session.audio_processor.base64_to_bytes(audio_data_b64)
             
-            # Add to buffer
+            # Add to buffer (don't process automatically)
             session.audio_buffer.add(audio_bytes)
             
-            # Check if buffer is ready for processing
-            if session.audio_buffer.is_ready() or session.audio_buffer.is_full():
-                await self._process_audio_buffer(session)
+            # Only warn if buffer is getting too full (but don't auto-process)
+            if session.audio_buffer.is_full():
+                logger.warning(f"Audio buffer is full ({session.audio_buffer.get_duration():.1f}s), waiting for stop signal")
         
         except Exception as e:
             logger.error(f"Error handling audio: {e}")
@@ -568,11 +568,15 @@ class VoiceWebSocketHandler:
         Args:
             session: Voice session
         """
-        # Clear buffer
-        session.audio_buffer.clear()
+        logger.info(f"[Voice] Received stop signal, processing {session.audio_buffer.get_chunk_count()} audio chunks ({session.audio_buffer.get_duration():.1f}s)")
         
-        # Reset to idle
-        await session.send_status("idle", "Stopped")
+        # Process the accumulated audio buffer
+        if session.audio_buffer.get_chunk_count() > 0:
+            await self._process_audio_buffer(session)
+        else:
+            logger.warning("[Voice] No audio chunks to process")
+            await session.send_status("idle", "No audio recorded")
+
     
     def get_active_sessions(self) -> list:
         """Get list of active session IDs."""
