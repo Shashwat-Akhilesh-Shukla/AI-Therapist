@@ -427,11 +427,11 @@ class CognitiveReasoningEngine:
             knowledge_text = "\n---\n".join(knowledge_snippets)
             base_prompt += f"""
 
-You have access to the following background information that may be relevant to the conversation.
-When it is helpful, integrate this knowledge naturally into your responses, without citing sources or referencing documents.
+    You have access to the following background information that may be relevant to the conversation.
+    When it is helpful, integrate this knowledge naturally into your responses, without citing sources or referencing documents.
 
-{knowledge_text}
-"""
+    {knowledge_text}
+    """
 
         # --- User Emotional State Context ---
         user_emotion = context.get("user_emotion", "neutral")
@@ -450,9 +450,9 @@ Simply adapt your therapeutic approach to be empathetic to this emotional state.
         if context.get("user_preferences"):
             base_prompt += f"""
 
-Additional user context to keep in mind while responding:
-{context['user_preferences']}
-"""
+    Additional user context to keep in mind while responding:
+    {context['user_preferences']}
+    """
 
         return base_prompt
 
