@@ -14,12 +14,18 @@ PyJWT
 redis
 pinecone
 
-numpy
+numpy<2.4,>=2.0  # Version constraint for Numba compatibility
 pdfplumber
 
 # Voice Processing Dependencies
 faster-whisper>=0.10.0
-# TTS - Not compatible with Python 3.12, install manually if needed with older Python
+
+# TTS and Dependencies - Not compatible with Python 3.12
+TTS>=0.22.0
+gruut>=2.2.3
+gruut-ipa>=0.13.0
+bnnumerizer>=0.0.2
+jieba>=0.42.1
 pydub>=0.25.1
 soundfile>=0.12.1
 
