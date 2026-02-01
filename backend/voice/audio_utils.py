@@ -261,6 +261,179 @@ class AudioBuffer:
         return len(self.chunks)
 
 
+class VADBuffer:
+    """
+    Voice Activity Detection buffer for silence-based STT triggering.
+    
+    Triggers transcription when:
+    - Silence is detected for >= silence_threshold_ms, OR
+    - Buffer duration reaches max_duration_s
+    
+    Uses RMS energy for silence detection.
+    """
+    
+    def __init__(
+        self,
+        silence_threshold_ms: int = 1000,
+        max_duration_s: float = 6.0,
+        rms_silence_threshold: float = 0.01,
+        sample_rate: int = 16000
+    ):
+        """
+        Initialize VAD buffer.
+        
+        Args:
+            silence_threshold_ms: Silence duration before triggering (default: 1000ms)
+            max_duration_s: Maximum buffer duration before forced trigger (default: 6s)
+            rms_silence_threshold: RMS threshold below which audio is considered silence
+            sample_rate: Expected sample rate for duration estimation
+        """
+        self.silence_threshold_ms = silence_threshold_ms
+        self.max_duration_s = max_duration_s
+        self.rms_silence_threshold = rms_silence_threshold
+        self.sample_rate = sample_rate
+        
+        self.chunks: List[bytes] = []
+        self.total_bytes = 0
+        self.silence_start_time: Optional[float] = None
+        self.has_speech = False
+        
+        self._processor = AudioProcessor()
+    
+    def add_chunk(self, audio_bytes: bytes) -> None:
+        """
+        Add audio chunk to buffer.
+        
+        Args:
+            audio_bytes: Raw audio data
+        """
+        import time
+        
+        self.chunks.append(audio_bytes)
+        self.total_bytes += len(audio_bytes)
+        
+        # Check if this chunk is silence
+        is_silence = self._is_silence(audio_bytes)
+        
+        if is_silence:
+            if self.silence_start_time is None:
+                self.silence_start_time = time.perf_counter()
+        else:
+            self.silence_start_time = None
+            self.has_speech = True
+    
+    def _is_silence(self, audio_bytes: bytes) -> bool:
+        """
+        Check if audio chunk is silence using RMS energy.
+        
+        Args:
+            audio_bytes: Audio data to check
+            
+        Returns:
+            bool: True if audio is below silence threshold
+        """
+        try:
+            # Convert bytes to numpy array
+            audio_array = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32)
+            
+            if len(audio_array) == 0:
+                return True
+            
+            # Normalize to [-1, 1]
+            audio_array = audio_array / 32768.0
+            
+            # Calculate RMS
+            rms = np.sqrt(np.mean(audio_array ** 2))
+            
+            return rms < self.rms_silence_threshold
+            
+        except Exception:
+            # If we can't analyze, assume not silence
+            return False
+    
+    def should_trigger(self) -> bool:
+        """
+        Check if STT should be triggered.
+        
+        Returns:
+            bool: True if silence threshold reached or max duration exceeded
+        """
+        import time
+        
+        # Must have some speech first
+        if not self.has_speech:
+            return False
+        
+        # Check silence duration
+        if self.silence_start_time is not None:
+            silence_duration_ms = (time.perf_counter() - self.silence_start_time) * 1000
+            if silence_duration_ms >= self.silence_threshold_ms:
+                return True
+        
+        # Check max duration (rough estimate: ~3200 bytes per second for compressed audio)
+        estimated_duration = self.total_bytes / 3200.0
+        if estimated_duration >= self.max_duration_s:
+            return True
+        
+        return False
+    
+    def get_audio_and_reset(self) -> bytes:
+        """
+        Get combined audio data and reset buffer.
+        
+        Returns:
+            bytes: Combined audio in WAV format
+        """
+        if not self.chunks:
+            return b''
+        
+        try:
+            from pydub import AudioSegment
+            
+            # Concatenate raw bytes first (critical for WebM streaming)
+            combined_bytes = b''.join(self.chunks)
+            
+            # Try to decode as WebM first
+            try:
+                audio = AudioSegment.from_file(
+                    io.BytesIO(combined_bytes),
+                    format="webm"
+                )
+            except Exception:
+                # Fallback to auto-detect
+                audio = AudioSegment.from_file(io.BytesIO(combined_bytes))
+            
+            # Export as WAV
+            output_io = io.BytesIO()
+            audio.export(output_io, format="wav")
+            output_io.seek(0)
+            wav_bytes = output_io.read()
+            
+        except Exception as e:
+            logger.warning(f"Failed to convert audio: {e}")
+            wav_bytes = b''.join(self.chunks)
+        
+        # Reset buffer
+        self.clear()
+        
+        return wav_bytes
+    
+    def clear(self) -> None:
+        """Reset buffer to empty state."""
+        self.chunks.clear()
+        self.total_bytes = 0
+        self.silence_start_time = None
+        self.has_speech = False
+    
+    def get_duration(self) -> float:
+        """Get estimated buffer duration in seconds."""
+        return self.total_bytes / 3200.0
+    
+    def get_chunk_count(self) -> int:
+        """Get number of chunks in buffer."""
+        return len(self.chunks)
+
+
 class AudioValidator:
     """
     Validates audio data for processing.

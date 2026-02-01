@@ -1,24 +1,36 @@
 """
 Model Manager for Voice Agent
 
-Handles lazy loading, caching, and lifecycle management of STT and TTS models.
-Implements singleton pattern to ensure only one instance of each model is loaded.
+Handles startup-only loading and lifecycle management of STT and TTS models.
+Implements singleton pattern with fail-fast initialization.
+
+CRITICAL: Models MUST be loaded at application startup via initialize_at_startup().
+Lazy loading is disabled to prevent first-request latency spikes.
 """
 
 import os
 import logging
+import time
 from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 
+class ModelNotInitializedError(Exception):
+    """Raised when attempting to access models before startup initialization."""
+    pass
+
+
 class ModelManager:
     """
     Centralized manager for STT and TTS models.
     
+    IMPORTANT: Call initialize_at_startup() during application startup.
+    Models are NOT lazily loaded - they must be pre-initialized.
+    
     Features:
-    - Lazy loading: models only load on first use
+    - Startup-only loading (fail-fast)
     - Singleton pattern: one instance per model type
     - Automatic caching to disk
     - Environment-based configuration
@@ -27,7 +39,8 @@ class ModelManager:
     _instance = None
     _stt_model = None
     _tts_model = None
-    _models_loaded = False
+    _initialized = False
+    _initialization_time_ms = 0
     
     def __new__(cls):
         if cls._instance is None:
@@ -48,100 +61,159 @@ class ModelManager:
         return os.getenv("VOICE_ENABLED", "true").lower() == "true"
     
     @classmethod
+    def is_initialized(cls) -> bool:
+        """Check if models have been initialized at startup."""
+        return cls._initialized
+    
+    @classmethod
+    def _ensure_initialized(cls):
+        """Raise error if models not initialized. Call this before returning models."""
+        if not cls._initialized:
+            raise ModelNotInitializedError(
+                "Voice models not initialized. Call ModelManager.initialize_at_startup() "
+                "during application startup before handling voice requests."
+            )
+    
+    @classmethod
+    def initialize_at_startup(cls) -> dict:
+        """
+        Initialize all voice models at application startup.
+        
+        MUST be called during FastAPI startup event.
+        Fails fast if any model fails to load.
+        
+        Returns:
+            dict: Initialization timing and status
+            
+        Raises:
+            Exception: If any model fails to load (fail-fast)
+        """
+        if cls._initialized:
+            logger.warning("Models already initialized, skipping re-initialization")
+            return {"status": "already_initialized", "time_ms": cls._initialization_time_ms}
+        
+        if not cls.is_voice_enabled():
+            logger.info("Voice functionality disabled (VOICE_ENABLED=false), skipping model init")
+            cls._initialized = True
+            return {"status": "disabled", "time_ms": 0}
+        
+        start_time = time.perf_counter()
+        
+        try:
+            # Load STT model
+            logger.info("=" * 50)
+            logger.info("[STARTUP] Loading STT model...")
+            stt_start = time.perf_counter()
+            cls._load_stt_model()
+            stt_time = (time.perf_counter() - stt_start) * 1000
+            logger.info(f"[STARTUP] STT model loaded in {stt_time:.0f}ms")
+            
+            # Load TTS model
+            logger.info("[STARTUP] Loading TTS model...")
+            tts_start = time.perf_counter()
+            cls._load_tts_model()
+            tts_time = (time.perf_counter() - tts_start) * 1000
+            logger.info(f"[STARTUP] TTS model loaded in {tts_time:.0f}ms")
+            
+            total_time = (time.perf_counter() - start_time) * 1000
+            cls._initialization_time_ms = total_time
+            cls._initialized = True
+            
+            logger.info("=" * 50)
+            logger.info(f"[STARTUP] ✓ All voice models initialized in {total_time:.0f}ms")
+            logger.info("=" * 50)
+            
+            return {
+                "status": "success",
+                "stt_time_ms": stt_time,
+                "tts_time_ms": tts_time,
+                "total_time_ms": total_time
+            }
+            
+        except Exception as e:
+            logger.error("=" * 50)
+            logger.error(f"[STARTUP] ✗ FATAL: Voice model initialization failed: {e}")
+            logger.error("[STARTUP] Voice functionality will be unavailable")
+            logger.error("=" * 50)
+            # Re-raise to fail fast - startup should abort
+            raise
+    
+    @classmethod
+    def _load_stt_model(cls):
+        """Internal: Load STT model. Called only during startup."""
+        from .stt import WhisperSTT
+        
+        model_name = os.getenv("WHISPER_MODEL", "openai/whisper-medium")
+        device = os.getenv("WHISPER_DEVICE", "cpu")
+        compute_type = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
+        
+        logger.info(f"  Model: {model_name}")
+        logger.info(f"  Device: {device}, Compute: {compute_type}")
+        
+        cls._stt_model = WhisperSTT(
+            model_name=model_name,
+            cache_dir=str(cls.get_cache_dir()),
+            device=device,
+            compute_type=compute_type
+        )
+    
+    @classmethod
+    def _load_tts_model(cls):
+        """Internal: Load TTS model. Called only during startup."""
+        from .tts import CoquiTTS
+        
+        model_name = os.getenv("COQUI_MODEL", "tts_models/en/ljspeech/tacotron2-DDC")
+        
+        logger.info(f"  Model: {model_name}")
+        
+        cls._tts_model = CoquiTTS(
+            model_name=model_name,
+            cache_dir=str(cls.get_cache_dir())
+        )
+    
+    @classmethod
     def get_stt_model(cls):
         """
-        Get or initialize the STT model.
+        Get the pre-loaded STT model.
         
         Returns:
             WhisperSTT: Initialized Whisper model instance
+            
+        Raises:
+            ModelNotInitializedError: If called before initialize_at_startup()
         """
         if not cls.is_voice_enabled():
-            logger.warning("Voice functionality is disabled (VOICE_ENABLED=false)")
             return None
         
-        if cls._stt_model is None:
-            try:
-                from .stt import WhisperSTT
-                
-                model_name = os.getenv("WHISPER_MODEL", "openai/whisper-medium")
-                device = os.getenv("WHISPER_DEVICE", "cpu")
-                compute_type = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
-                
-                logger.info(f"Loading Whisper STT model: {model_name} on {device} with {compute_type}")
-                
-                cls._stt_model = WhisperSTT(
-                    model_name=model_name,
-                    cache_dir=str(cls.get_cache_dir()),
-                    device=device,
-                    compute_type=compute_type
-                )
-                
-                logger.info("✓ Whisper STT model loaded successfully")
-                
-            except Exception as e:
-                logger.error(f"Failed to load STT model: {e}")
-                cls._stt_model = None
-                raise
-        
+        cls._ensure_initialized()
         return cls._stt_model
     
     @classmethod
     def get_tts_model(cls):
         """
-        Get or initialize the TTS model.
+        Get the pre-loaded TTS model.
         
         Returns:
             CoquiTTS: Initialized Coqui TTS model instance
+            
+        Raises:
+            ModelNotInitializedError: If called before initialize_at_startup()
         """
         if not cls.is_voice_enabled():
-            logger.warning("Voice functionality is disabled (VOICE_ENABLED=false)")
             return None
         
-        if cls._tts_model is None:
-            try:
-                from .tts import CoquiTTS
-                
-                model_name = os.getenv(
-                    "COQUI_MODEL", 
-                    "tts_models/en/ljspeech/tacotron2-DDC"
-                )
-                
-                logger.info(f"Loading Coqui TTS model: {model_name}")
-                
-                cls._tts_model = CoquiTTS(
-                    model_name=model_name,
-                    cache_dir=str(cls.get_cache_dir())
-                )
-                
-                logger.info("✓ Coqui TTS model loaded successfully")
-                
-            except Exception as e:
-                logger.error(f"Failed to load TTS model: {e}")
-                cls._tts_model = None
-                raise
-        
+        cls._ensure_initialized()
         return cls._tts_model
     
     @classmethod
     def preload_models(cls):
         """
-        Preload both STT and TTS models.
+        DEPRECATED: Use initialize_at_startup() instead.
         
-        Useful for warming up the system before handling requests.
+        Kept for backwards compatibility.
         """
-        if not cls.is_voice_enabled():
-            logger.info("Voice functionality disabled, skipping model preload")
-            return
-        
-        try:
-            logger.info("Preloading voice models...")
-            cls.get_stt_model()
-            cls.get_tts_model()
-            cls._models_loaded = True
-            logger.info("✓ All voice models preloaded successfully")
-        except Exception as e:
-            logger.error(f"Failed to preload models: {e}")
-            raise
+        logger.warning("preload_models() is deprecated. Use initialize_at_startup() instead.")
+        return cls.initialize_at_startup()
     
     @classmethod
     def unload_models(cls):
@@ -160,7 +232,8 @@ class ModelManager:
             cls._tts_model = None
             logger.info("TTS model unloaded")
         
-        cls._models_loaded = False
+        cls._initialized = False
+        cls._initialization_time_ms = 0
     
     @classmethod
     def get_model_info(cls) -> dict:
@@ -172,7 +245,8 @@ class ModelManager:
         """
         return {
             "voice_enabled": cls.is_voice_enabled(),
-            "models_loaded": cls._models_loaded,
+            "initialized": cls._initialized,
+            "initialization_time_ms": cls._initialization_time_ms,
             "stt_loaded": cls._stt_model is not None,
             "tts_loaded": cls._tts_model is not None,
             "cache_dir": str(cls.get_cache_dir()),

@@ -183,26 +183,77 @@ class WhisperSTT:
         task: str = "transcribe"
     ) -> Dict[str, Any]:
         """
-        Synchronous version of transcribe (for non-async contexts).
+        Synchronous transcription for use with thread pool executor.
         
         Args:
-            audio_bytes: Audio data
-            language: Language code
+            audio_bytes: Audio data (WAV format, 16kHz recommended)
+            language: Language code (e.g., 'en'). Auto-detect if None.
             task: 'transcribe' or 'translate'
         
         Returns:
-            dict: Transcription result
+            dict: Transcription result with 'text', 'language', 'duration', 'segments'
         """
-        # Since faster-whisper is synchronous, we can just call the async version
-        # without await (it's not actually async)
-        import asyncio
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
+        if not self.model:
+            raise RuntimeError("Whisper model not loaded")
         
-        return loop.run_until_complete(self.transcribe(audio_bytes, language, task))
+        start_time = time.time()
+        
+        try:
+            # Save audio to temporary file (faster-whisper requires file path)
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
+                temp_path = temp_file.name
+                temp_file.write(audio_bytes)
+            
+            try:
+                # Transcribe
+                segments, info = self.model.transcribe(
+                    temp_path,
+                    language=language,
+                    task=task,
+                    beam_size=5,
+                    vad_filter=True,
+                    vad_parameters=dict(
+                        min_silence_duration_ms=500,
+                        speech_pad_ms=200
+                    )
+                )
+                
+                # Collect segments
+                segment_list = []
+                full_text = ""
+                
+                for segment in segments:
+                    segment_dict = {
+                        'start': segment.start,
+                        'end': segment.end,
+                        'text': segment.text.strip()
+                    }
+                    segment_list.append(segment_dict)
+                    full_text += segment.text.strip() + " "
+                
+                full_text = full_text.strip()
+                processing_time = time.time() - start_time
+                
+                result = {
+                    'text': full_text,
+                    'language': info.language if hasattr(info, 'language') else 'unknown',
+                    'duration': info.duration if hasattr(info, 'duration') else 0.0,
+                    'processing_time': processing_time,
+                    'segments': segment_list
+                }
+                
+                logger.info(f"[SYNC] Transcription: '{full_text[:50]}...' ({processing_time:.2f}s)")
+                return result
+                
+            finally:
+                try:
+                    os.unlink(temp_path)
+                except Exception:
+                    pass
+        
+        except Exception as e:
+            logger.error(f"Transcription failed: {e}")
+            raise
     
     def get_supported_languages(self) -> list:
         """

@@ -142,24 +142,59 @@ class CoquiTTS:
         language: Optional[str] = None
     ) -> bytes:
         """
-        Synchronous version of synthesize.
+        Synchronous synthesis for use with thread pool executor.
         
         Args:
             text: Text to synthesize
-            speaker: Speaker name
-            language: Language code
+            speaker: Speaker name (for multi-speaker models)
+            language: Language code (for multi-lingual models)
         
         Returns:
             bytes: WAV audio data
         """
-        import asyncio
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
+        if not self.tts:
+            raise RuntimeError("TTS model not loaded")
         
-        return loop.run_until_complete(self.synthesize(text, speaker, language))
+        start_time = time.time()
+        
+        try:
+            # Create temporary file for output
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
+                temp_path = temp_file.name
+            
+            try:
+                # Build kwargs
+                kwargs = {}
+                if speaker:
+                    kwargs['speaker'] = speaker
+                if language:
+                    kwargs['language'] = language
+                
+                # Synthesize to file
+                self.tts.tts_to_file(
+                    text=text,
+                    file_path=temp_path,
+                    **kwargs
+                )
+                
+                # Read audio data
+                with open(temp_path, 'rb') as f:
+                    audio_bytes = f.read()
+                
+                processing_time = time.time() - start_time
+                logger.info(f"[SYNC] TTS: {len(text)} chars in {processing_time:.2f}s")
+                
+                return audio_bytes
+                
+            finally:
+                try:
+                    os.unlink(temp_path)
+                except Exception:
+                    pass
+        
+        except Exception as e:
+            logger.error(f"TTS synthesis failed: {e}")
+            raise
     
     async def synthesize_stream(
         self,

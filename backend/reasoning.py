@@ -16,7 +16,7 @@ import json
 from backend.memory.stm import STMManager
 from backend.memory.ltm import LTMManager
 from backend.pdf_loader import PDFLoader
-from backend.prompts import THERAPIST_SYSTEM_PROMPT
+from backend.prompts import THERAPIST_SYSTEM_PROMPT, VOICE_MODE_SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
 
@@ -60,13 +60,20 @@ class CognitiveReasoningEngine:
                         ltm_memories: Optional[List[Dict[str, Any]]] = None,
                         pdf_snippets: Optional[List[str]] = None,
                         conversation_id: str = None,
-                        current_emotion: str = "neutral") -> Dict[str, Any]:
+                        current_emotion: str = "neutral",
+                        voice_mode: bool = False) -> Dict[str, Any]:
         """
         Process a user message through the cognitive loop.
 
         Args:
             user_message: The user's input message
             user_id: Unique identifier for the user
+            stm_memories: Short-term memories (optional, for voice mode skip)
+            ltm_memories: Long-term memories (optional, for voice mode skip)
+            pdf_snippets: PDF knowledge snippets (optional, for voice mode skip)
+            conversation_id: Conversation ID
+            current_emotion: User's current emotion
+            voice_mode: If True, generates shorter responses optimized for TTS
 
         Returns:
             Response dictionary with message, reasoning, and metadata
@@ -76,6 +83,7 @@ class CognitiveReasoningEngine:
         try:
             
             processed_input = self._process_input(user_message, user_id, current_emotion)
+            processed_input["voice_mode"] = voice_mode
 
             
             recalled_info = {
@@ -87,13 +95,17 @@ class CognitiveReasoningEngine:
 
             
             response_plan = self._plan_response(processed_input, recalled_info)
+            response_plan["voice_mode"] = voice_mode
 
             
-            response = await self._generate_response(response_plan, processed_input, recalled_info)
+            response = await self._generate_response(response_plan, processed_input, recalled_info, voice_mode=voice_mode)
 
             
-            
-            memory_actions = self._determine_memory_actions(user_message, response, recalled_info, response_plan, user_id)
+            # Skip memory actions in voice mode for speed
+            if voice_mode:
+                memory_actions = []
+            else:
+                memory_actions = self._determine_memory_actions(user_message, response, recalled_info, response_plan, user_id)
 
             processing_time = time.time() - start_time
 
@@ -104,12 +116,14 @@ class CognitiveReasoningEngine:
                     "recalled_memories": len(recalled_info.get("stm_memories", [])) + len(recalled_info.get("ltm_memories", [])),
                     "pdf_knowledge_used": len(recalled_info.get("pdf_knowledge", [])),
                     "response_plan": response_plan,
-                    "processing_time": processing_time
+                    "processing_time": processing_time,
+                    "voice_mode": voice_mode
                 },
                 "metadata": {
                     "user_id": user_id,
                     "timestamp": time.time(),
-                    "model_used": self.model
+                    "model_used": self.model,
+                    "voice_mode": voice_mode
                 },
                 "memory_actions": memory_actions
             }
@@ -262,13 +276,14 @@ class CognitiveReasoningEngine:
         
         return stm_count > 0 and ltm_count > 0
 
-    async def _generate_response(self, response_plan: Dict[str, Any], processed_input: Dict[str, Any], recalled_info: Dict[str, Any], stream: bool = False):
+    async def _generate_response(self, response_plan: Dict[str, Any], processed_input: Dict[str, Any], recalled_info: Dict[str, Any], stream: bool = False, voice_mode: bool = False):
         """
         Generate the actual response using the Perplexity API.
 
         Args:
             response_plan: The planned response strategy and context
             stream: If True, yields chunks as they arrive (async generator)
+            voice_mode: If True, uses voice-specific prompt and shorter token limit
 
         Returns:
             Generated response string (if stream=False) or async generator of chunks (if stream=True)
@@ -281,8 +296,16 @@ class CognitiveReasoningEngine:
         if response_plan.get("user_emotion"):
             context["user_emotion"] = response_plan.get("user_emotion")
 
-        system_prompt = self._build_system_prompt(strategy, context)
-        user_prompt = self._build_user_prompt(response_plan, processed_input, recalled_info)
+        # Use voice-specific prompt if in voice mode
+        if voice_mode:
+            system_prompt = VOICE_MODE_SYSTEM_PROMPT
+            max_tokens = 100  # Much shorter for voice responses
+            logger.info("[VOICE_MODE] Using voice-specific prompt with max_tokens=100")
+        else:
+            system_prompt = self._build_system_prompt(strategy, context)
+            max_tokens = 4000
+        
+        user_prompt = self._build_user_prompt(response_plan, processed_input, recalled_info, voice_mode=voice_mode)
 
         
         url = "https://api.perplexity.ai/chat/completions"
@@ -297,7 +320,7 @@ class CognitiveReasoningEngine:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            "max_tokens": 4000,
+            "max_tokens": max_tokens,
             "temperature": 0.7,
             "stream": stream
         }
@@ -456,9 +479,14 @@ Simply adapt your therapeutic approach to be empathetic to this emotional state.
 
         return base_prompt
 
-    def _build_user_prompt(self, response_plan: Dict[str, Any], processed_input: Dict[str, Any], recalled_info: Dict[str, Any]) -> str:
+    def _build_user_prompt(self, response_plan: Dict[str, Any], processed_input: Dict[str, Any], recalled_info: Dict[str, Any], voice_mode: bool = False) -> str:
         """Build the user prompt for the LLM using the real user message and selected context."""
         user_message = processed_input.get("original_message", "")
+        
+        # In voice mode, use a simplified prompt without memories/documents
+        if voice_mode:
+            return f"The user said: {user_message}\n\nRespond briefly in 2-3 short sentences."
+        
         response_style = response_plan.get("response_style", "informative")
         include_sources = response_plan.get("include_sources", False)
         context = response_plan.get("context_to_use", {})

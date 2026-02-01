@@ -273,14 +273,17 @@ async def startup_event():
         validate_environment()
         initialize_memory_systems()
         
-        # Optionally preload voice models (can be slow, so disabled by default)
-        # Uncomment to preload models on startup:
-        # if os.getenv("VOICE_PRELOAD_MODELS", "false").lower() == "true":
-        #     try:
-        #         logger.info("Preloading voice models...")
-        #         ModelManager.preload_models()
-        #     except Exception as e:
-        #         logger.warning(f"Failed to preload voice models: {e}")
+        # Initialize voice models at startup (MANDATORY for low latency)
+        # Models are loaded BEFORE server accepts requests
+        if ModelManager.is_voice_enabled():
+            try:
+                logger.info("Initializing voice models at startup...")
+                init_result = ModelManager.initialize_at_startup()
+                logger.info(f"Voice models ready: {init_result}")
+            except Exception as e:
+                logger.error(f"Voice model initialization failed: {e}")
+                # Don't fail startup - voice will be unavailable but app runs
+                logger.warning("Voice functionality will be unavailable")
         
         logger.info("✓ Startup complete: All systems initialized and validated")
     except RuntimeError as e:
