@@ -1,13 +1,14 @@
 version: '3.8'
 
 services:
-  ai-therapist:
+  # Backend Service (FastAPI)
+  backend:
     build:
       context: .
-      dockerfile: Dockerfile
-    container_name: ai-therapist
+      dockerfile: Dockerfile.backend
+    container_name: ai-therapist-backend
     ports:
-      - "8000:8000" # Backend API and Frontend
+      - "8000:8000" # Backend API
     environment:
       # API Keys
       - PERPLEXITY_API_KEY=${PERPLEXITY_API_KEY}
@@ -19,7 +20,7 @@ services:
 
       # Application Settings
       - STM_TTL=${STM_TTL:-3600}
-      - FRONTEND_URL=http://localhost:8000
+      - FRONTEND_URL=http://frontend:3000
       - NODE_ENV=production
       - PYTHONUNBUFFERED=1
 
@@ -41,6 +42,9 @@ services:
       # Persist model cache (prevents re-downloading on restart)
       - ai-therapist-models:/app/models
 
+    networks:
+      - ai-therapist-network
+
     restart: unless-stopped
 
     # GPU Configuration (optional, gracefully ignored if GPU not available)
@@ -58,6 +62,40 @@ services:
       timeout: 10s
       retries: 3
       start_period: 60s # Increased for model loading time
+
+  # Frontend Service (Next.js)
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: ai-therapist-frontend
+    ports:
+      - "3000:3000" # Frontend
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      # Internal backend URL for server-side requests
+      - BACKEND_URL=http://backend:8000
+
+    depends_on:
+      backend:
+        condition: service_healthy
+
+    networks:
+      - ai-therapist-network
+
+    restart: unless-stopped
+
+    healthcheck:
+      test: [ "CMD", "node", "-e", "require('http').get('http://localhost:3000', (r) => {if (r.statusCode !== 200) throw new Error(r.statusCode)})" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+networks:
+  ai-therapist-network:
+    driver: bridge
 
 volumes:
   ai-therapist-models:

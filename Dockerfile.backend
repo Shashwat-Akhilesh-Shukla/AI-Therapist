@@ -38,9 +38,6 @@ FROM dependencies as application
 # Copy backend source code
 COPY backend/ ./backend/
 
-# Copy static frontend files
-COPY static/ ./static/
-
 # Copy entrypoint script
 COPY docker-entrypoint.sh ./
 RUN chmod +x docker-entrypoint.sh
