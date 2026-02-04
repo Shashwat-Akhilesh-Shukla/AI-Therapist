@@ -69,6 +69,10 @@ dist/
 build/
 *.egg-info/
 
-# Old startup scripts
-start.sh
-docker-compose.yml
+# Model cache (downloaded at runtime or build time)
+backend/models/
+models/
+*.pth
+*.pt
+*.bin
+*.onnx

@@ -1,35 +1,64 @@
-version: '1'
+version: '3.8'
 
 services:
   ai-therapist:
     build:
       context: .
       dockerfile: Dockerfile
+    container_name: ai-therapist
     ports:
-      - "3000:3000"  # Frontend
-      - "8000:8000"  # Backend API
+      - "8000:8000" # Backend API and Frontend
     environment:
+      # API Keys
       - PERPLEXITY_API_KEY=${PERPLEXITY_API_KEY}
       - PINECONE_API_KEY=${PINECONE_API_KEY}
       - PINECONE_ENVIRONMENT=${PINECONE_ENVIRONMENT:-us-west4-gcp-free}
       - REDIS_URL=${REDIS_URL}
       - JWT_SECRET_KEY=${JWT_SECRET_KEY}
-      - STM_TTL=${STM_TTL:-3600}
       - JINA_API_KEY=${JINA_API_KEY}
-      - FRONTEND_URL=http://localhost:3000
+
+      # Application Settings
+      - STM_TTL=${STM_TTL:-3600}
+      - FRONTEND_URL=http://localhost:8000
       - NODE_ENV=production
       - PYTHONUNBUFFERED=1
+
+      # Voice & GPU Settings
+      - VOICE_ENABLED=true
+      - MODEL_CACHE_DIR=/app/models
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      # Optional: Force specific device (cpu/cuda)
+      # - FORCE_DEVICE=cpu
+
+      # Optional: Custom model configurations
+      # - WHISPER_MODEL=openai/whisper-small  # Use smaller model for lower latency
+      # - COQUI_MODEL=tts_models/en/ljspeech/tacotron2-DDC
+
     volumes:
-      # Mount for SQLite database persistence (optional)
+      # Persist database
       - ./data:/app/data
+      # Persist model cache (prevents re-downloading on restart)
+      - ai-therapist-models:/app/models
+
     restart: unless-stopped
+
+    # GPU Configuration (optional, gracefully ignored if GPU not available)
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all # Use all available GPUs
+              capabilities: [ gpu ]
+
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 40s
+      start_period: 60s # Increased for model loading time
 
 volumes:
-  data:
+  ai-therapist-models:
     driver: local

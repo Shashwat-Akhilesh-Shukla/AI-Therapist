@@ -29,5 +29,5 @@ jieba>=0.42.1
 pydub>=0.25.1
 soundfile>=0.12.1
 
-# PyTorch CPU-only (no NVIDIA GPU) - Install separately with: 
-# pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+# Note: PyTorch is installed separately via install_pytorch.sh
+# This allows conditional installation based on GPU availability

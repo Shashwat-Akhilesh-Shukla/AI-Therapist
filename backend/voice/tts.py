@@ -28,7 +28,8 @@ class CoquiTTS:
     def __init__(
         self,
         model_name: str = "tts_models/en/ljspeech/tacotron2-DDC",
-        cache_dir: str = "backend/models"
+        cache_dir: str = "backend/models",
+        use_gpu: bool = False
     ):
         """
         Initialize Coqui TTS model.
@@ -36,9 +37,11 @@ class CoquiTTS:
         Args:
             model_name: Coqui TTS model identifier
             cache_dir: Directory for model caching
+            use_gpu: Whether to use GPU for synthesis
         """
         self.model_name = model_name
         self.cache_dir = Path(cache_dir)
+        self.use_gpu = use_gpu
         self.tts = None
         
         # Create cache directory
@@ -62,7 +65,7 @@ class CoquiTTS:
             self.tts = TTS(
                 model_name=self.model_name,
                 progress_bar=False,
-                gpu=False  # Use CPU for compatibility
+                gpu=self.use_gpu  # Use GPU when available
             )
             
             logger.info("✓ Coqui TTS model loaded successfully")

@@ -185,13 +185,23 @@ class ModelManager:
         """Internal: Load TTS model. Called only during startup."""
         from .tts import CoquiTTS
         
+        # Get GPU-aware configuration
+        if GPU_DETECTOR_AVAILABLE:
+            from backend.gpu_detector import get_tts_config
+            gpu_config = get_tts_config()
+            use_gpu = gpu_config['gpu']
+        else:
+            use_gpu = False
+        
         model_name = os.getenv("COQUI_MODEL", "tts_models/en/ljspeech/tacotron2-DDC")
         
         logger.info(f"  Model: {model_name}")
+        logger.info(f"  GPU: {use_gpu}")
         
         cls._tts_model = CoquiTTS(
             model_name=model_name,
-            cache_dir=str(cls.get_cache_dir())
+            cache_dir=str(cls.get_cache_dir()),
+            use_gpu=use_gpu
         )
     
     @classmethod

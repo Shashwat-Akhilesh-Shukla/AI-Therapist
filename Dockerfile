@@ -1,21 +1,39 @@
-# Single-server Dockerfile for AI Therapist
-# Static HTML/CSS/JS frontend served by FastAPI backend
+# Multi-stage Dockerfile for AI Therapist with GPU Support
+# Automatically detects and uses GPU when available, falls back to CPU
 
-FROM python:3.11-slim
+# ============================================
+# Stage 1: Base Image with System Dependencies
+# ============================================
+FROM python:3.11-slim as base
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
     curl \
+    ffmpeg \
+    # Optional: CUDA compatibility libraries (loaded only if GPU available)
     && rm -rf /var/lib/apt/lists/*
 
-# Set working directory
 WORKDIR /app
 
-# Copy backend requirements
+# ============================================
+# Stage 2: Python Dependencies
+# ============================================
+FROM base as dependencies
+
+# Copy requirements file
 COPY backend/requirements.txt ./backend/
 
-# Install Python dependencies
+# Install Python dependencies (except PyTorch)
 RUN pip install --no-cache-dir -r backend/requirements.txt
+
+# Install PyTorch conditionally based on GPU availability
+COPY install_pytorch.sh ./
+RUN chmod +x install_pytorch.sh && ./install_pytorch.sh
+
+# ============================================
+# Stage 3: Application
+# ============================================
+FROM dependencies as application
 
 # Copy backend source code
 COPY backend/ ./backend/
@@ -23,18 +41,24 @@ COPY backend/ ./backend/
 # Copy static frontend files
 COPY static/ ./static/
 
-# Create directory for SQLite database (if using persistent volume)
-RUN mkdir -p /app/data
+# Copy entrypoint script
+COPY docker-entrypoint.sh ./
+RUN chmod +x docker-entrypoint.sh
 
-# Expose port (single port for both API and frontend)
-EXPOSE 8000
+# Create directories for data and model cache
+RUN mkdir -p /app/data /app/models
 
 # Set environment variables
-ENV PYTHONUNBUFFERED=1
+ENV PYTHONUNBUFFERED=1 \
+    MODEL_CACHE_DIR=/app/models \
+    VOICE_ENABLED=true
+
+# Expose port
+EXPOSE 8000
 
 # Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-# Run FastAPI server
-CMD ["sh", "-c", "uvicorn backend.main:app --host 0.0.0.0 --port ${PORT}"]
+# Use entrypoint script
+ENTRYPOINT ["./docker-entrypoint.sh"]
